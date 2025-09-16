@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: cubifyanything
+Version: 0.0.1
+Summary: Public release of Cubify Anything
+Home-page: https://github.com/apple/ml-cubifyanything
+Author: Apple Inc.
+Author-email: jlazarow@apple.com
+License-File: LICENSE
+License-File: LICENSE_MODEL
+Dynamic: author
+Dynamic: author-email
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: summary

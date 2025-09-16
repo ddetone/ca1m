@@ -20,6 +20,12 @@ from cubifyanything.boxes import GeneralInstance3DBoxes, BoxDOF
 from cubifyanything.instances import Instances3D
 from cubifyanything.measurement import ImageMeasurementInfo, DepthMeasurementInfo
 from cubifyanything.sensor import SensorArrayInfo, SensorInfo, PosedSensorInfo
+from cubifyanything.capture_stream import get_camera_to_gravity_transform
+from cubifyanything.orientation import ImageOrientation
+
+
+from read import load_one
+import os
 
 def custom_pipe_cleaner(spec):
     # This should only be called when using links directly to the MLR CDN, so assume some stuff.
@@ -123,47 +129,85 @@ class CubifyAnythingDataset(webdataset.DataPipeline):
                 world=dict(instances=read_instances(sample["gt/instances"])),
                 meta=dict(video_id=video_id))
             
-        gt_depth_size = parse_size(sample["_gt/depth/size"])
+        # gt_depth_size = parse_size(sample["_gt/depth/size"])
 
         timestamp = float(timestamp) / 1e9
 
         # At this point, everything is in camera coordinates.        
         wide = PosedSensorInfo()
         wide.RT = torch.eye(4)[None]
-        wide.image = ImageMeasurementInfo(
-            size=parse_size(sample["_wide/image/size"]),
-            K=parse_transform_3x3(sample["wide/image/k"])[None],
-        )
-        
-        if self.load_arkit_depth:
-            wide.depth = DepthMeasurementInfo(            
-                size=parse_size(sample["_wide/depth/size"]),
-                K=parse_transform_3x3(sample["wide/depth/k"])[None])
-            
-        wide.T_gravity = parse_transform_3x3(sample["wide/t_gravity"])[None]
 
+        #wide.image = ImageMeasurementInfo(
+        #    size=parse_size(sample["_wide/image/size"]),
+        #    K=parse_transform_3x3(sample["wide/image/k"])[None],
+        #)
+        root_dir = os.path.expanduser(f"~/data/aeo_seq21_188862233995371")
+        idx = int((timestamp - 273954.896831666) * 10.0)
+        idx += 30 # skip first 3 seconds
+
+
+        img_torch, cam, T_wc = load_one(root_dir, idx)
+        HH = img_torch.shape[2]
+        WW = img_torch.shape[3]
+        img_size = (HH, WW)
+        K = torch.eye(3)
+        K[0, 0] = cam.f[0]
+        K[1, 1] = cam.f[1]
+        K[0, 2] = cam.c[0]
+        K[1, 2] = cam.c[1]
+        K = K[None]
+
+        #wide.image = ImageMeasurementInfo(
+        #    size=parse_size(sample["_wide/image/size"]),
+        #    K=parse_transform_3x3(sample["wide/image/k"])[None],
+        #)
+        wide.image = ImageMeasurementInfo(size=img_size, K=K)
+        
+        #if self.load_arkit_depth:
+        #    wide.depth = DepthMeasurementInfo(            
+        #        size=parse_size(sample["_wide/depth/size"]),
+        #        K=parse_transform_3x3(sample["wide/depth/k"])[None])
         gt = PosedSensorInfo()        
         gt.RT = parse_transform_4x4(sample["gt/rt"])[None]
-        gt.depth = DepthMeasurementInfo(
-            size=parse_size(sample["_gt/depth/size"]),
-            K=parse_transform_3x3(sample["gt/depth/k"])[None])
+
+        #torch.set_printoptions(precision=4, sci_mode=False)
+        ## TODO(dd): set this! need to load trajectory.
+        #wide.T_gravity = parse_transform_3x3(sample["wide/t_gravity"])[None]
+        #print(wide.T_gravity)
+        #T_gravity2 = get_camera_to_gravity_transform(gt.RT, ImageOrientation.UPRIGHT, target=ImageOrientation.UPRIGHT)
+        #print(T_gravity2)
+        T_gravity3 = get_camera_to_gravity_transform(T_wc.matrix, ImageOrientation.UPRIGHT, target=ImageOrientation.UPRIGHT)
+        #print(T_gravity3)
+        wide.T_gravity = T_gravity3[None]
 
         sensor_info = SensorArrayInfo()
         sensor_info.wide = wide
-        sensor_info.gt = gt
+        #sensor_info.gt = gt
+
+        #img_torch = img_torch[None]
 
         result = dict(
             sensor_info=sensor_info,
             wide=dict(
-                image=read_image_bytes(sample["wide/image"], expected_size=wide.image.size)[None],
-                instances=read_instances(sample["wide/instances"])),
-            gt=dict(
-                # NOTE: 0.0 values here correspond to failed registration areas.
-                depth=read_image_bytes(sample["gt/depth"], expected_size=gt.depth.size)[None].float() / MM_TO_M),
+                image=img_torch,
+            ),
+                #instances=read_instances(sample["wide/instances"])),
+            #gt=dict(
+            #    # NOTE: 0.0 values here correspond to failed registration areas.
+            #    depth=read_image_bytes(sample["gt/depth"], expected_size=gt.depth.size)[None].float() / MM_TO_M),
             meta=dict(video_id=video_id, timestamp=timestamp))
+        #result = dict(
+        #    sensor_info=sensor_info,
+        #    wide=dict(
+        #        image=read_image_bytes(sample["wide/image"], expected_size=wide.image.size)[None],
+        #        instances=read_instances(sample["wide/instances"])),
+        #    #gt=dict(
+        #    #    # NOTE: 0.0 values here correspond to failed registration areas.
+        #    #    depth=read_image_bytes(sample["gt/depth"], expected_size=gt.depth.size)[None].float() / MM_TO_M),
+        #    meta=dict(video_id=video_id, timestamp=timestamp))
 
-        if self.load_arkit_depth:
-            result["wide"]["depth"] = read_image_bytes(sample["wide/depth"], expected_size=wide.depth.size)[None].float() / MM_TO_M
+        #if self.load_arkit_depth:
+        #    result["wide"]["depth"] = read_image_bytes(sample["wide/depth"], expected_size=wide.depth.size)[None].float() / MM_TO_M
 
         return result
 

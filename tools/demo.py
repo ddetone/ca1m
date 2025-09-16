@@ -80,111 +80,113 @@ def log_instances(instances, prefix, boxes_3d_name="gt_boxes_3d", ids_name="gt_i
             show_labels=False),
         **kwargs)
 
-def load_data_and_visualize(dataset):
-    blueprint = rrb.Blueprint(
-        rrb.Vertical(
-            contents=[
-                rrb.Spatial3DView(
-                    name="World",
-                    origin="/world"),
-                rrb.Horizontal(
-                    contents=[
-                        rrb.Spatial2DView(
-                            name="Image",
-                            origin="/device/wide/image",
-                            contents=[
-                                "+ $origin/**",
-                                "+ /device/wide/instances/**"
-                            ]),
-                        rrb.Spatial2DView(
-                            name="Depth",
-                            origin="/device/wide/depth"),
-                        rrb.Spatial2DView(
-                            name="Depth (GT)",
-                            origin="/device/gt/depth"),
-                    ],
-                    name="Wide")
-            ]))
+# def load_data_and_visualize(dataset):
+#     blueprint = rrb.Blueprint(
+#         rrb.Vertical(
+#             contents=[
+#                 rrb.Spatial3DView(
+#                     name="World",
+#                     origin="/world"),
+#                 rrb.Horizontal(
+#                     contents=[
+#                         rrb.Spatial2DView(
+#                             name="Image",
+#                             origin="/device/wide/image",
+#                             contents=[
+#                                 "+ $origin/**",
+#                                 "+ /device/wide/instances/**"
+#                             ]),
+#                         rrb.Spatial2DView(
+#                             name="Depth",
+#                             origin="/device/wide/depth"),
+#                         rrb.Spatial2DView(
+#                             name="Depth (GT)",
+#                             origin="/device/gt/depth"),
+#                     ],
+#                     name="Wide")
+#             ]))
 
-    recording = None
-    video_id = None
-    for sample in dataset:
-        sample_video_id = sample["meta"]["video_id"]
-        if (recording is None) or (video_id != sample_video_id):
-            new_recording = rerun.new_recording(
-                application_id=str(sample_video_id), recording_id=uuid.uuid4(), make_default=True)            
+#     recording = None
+#     video_id = None
+#     for sample in dataset:
+#         sample_video_id = sample["meta"]["video_id"]
+#         if (recording is None) or (video_id != sample_video_id):
+#             new_recording = rerun.new_recording(
+#                 application_id=str(sample_video_id), recording_id=uuid.uuid4(), make_default=True)            
 
-            new_recording.send_blueprint(blueprint, make_active=True)
-            rerun.spawn()
+#             new_recording.send_blueprint(blueprint, make_active=True)
+#             rerun.spawn()
 
-            recording = new_recording
-            video_id = sample_video_id
+#             recording = new_recording
+#             video_id = sample_video_id
         
-        # Check for the world. Note that this may not show if --every-nth-frame is used.
-        if "world" in sample:
-            world_instances = sample["world"]["instances"]
-            log_instances(world_instances, prefix="/world", static=True)
-            continue
+#         # Check for the world. Note that this may not show if --every-nth-frame is used.
+#         if "world" in sample:
+#             world_instances = sample["world"]["instances"]
+#             log_instances(world_instances, prefix="/world", static=True)
+#             continue
 
-        rerun.set_time_seconds("pts", sample["meta"]["timestamp"], recording=recording)
+#         rerun.set_time_seconds("pts", sample["meta"]["timestamp"], recording=recording)
 
-        # -> channels last.
-        image = np.moveaxis(sample["wide"]["image"][-1].numpy(), 0, -1)        
-        camera = rerun.Pinhole(
-            image_from_camera=sample["sensor_info"].wide.image.K[-1].numpy(), resolution=sample["sensor_info"].wide.image.size)
+#         # -> channels last.
+#         image = np.moveaxis(sample["wide"]["image"][-1].numpy(), 0, -1)        
 
-        # Log this to both the device (per-frame) and to the world.
-        rerun.log("/device/wide/image", rerun.Image(image).compress())
-        rerun.log("/device/wide/image", camera)
+#         camera = rerun.Pinhole(
+#             image_from_camera=sample["sensor_info"].wide.image.K[-1].numpy(), resolution=sample["sensor_info"].wide.image.size)
 
-        # RT here corresponds to the laser-scanner space, as registered to the capture device, so this allows us
-        # to visualize the camera with respect to the annotation space.
-        RT = sample["sensor_info"].gt.RT[-1].numpy()
-        pose_transform = rerun.Transform3D(
-            translation=RT[:3, 3],
-            rotation=rerun.Quaternion(xyzw=Rotation.from_matrix(RT[:3, :3]).as_quat()))
+#         # Log this to both the device (per-frame) and to the world.
+#         rerun.log("/device/wide/image", rerun.Image(image).compress())
+#         rerun.log("/device/wide/image", camera)
+
+#         # RT here corresponds to the laser-scanner space, as registered to the capture device, so this allows us
+#         # to visualize the camera with respect to the annotation space.
+#         RT = sample["sensor_info"].gt.RT[-1].numpy()
+#         pose_transform = rerun.Transform3D(
+#             translation=RT[:3, 3],
+#             rotation=rerun.Quaternion(xyzw=Rotation.from_matrix(RT[:3, :3]).as_quat()))
         
-        rerun.log("/world/image", pose_transform)
-        rerun.log("/world/image", camera)
-        rerun.log("/world/image/image", rerun.Image(image, opacity=0.5))
+#         rerun.log("/world/image", pose_transform)
+#         rerun.log("/world/image", camera)
+#         rerun.log("/world/image/image", rerun.Image(image, opacity=0.5))
 
-        rerun.log("/device/wide/depth", rerun.DepthImage(sample["wide"]["depth"][-1].numpy()))
-        rerun.log("/device/gt/depth", rerun.DepthImage(sample["gt"]["depth"][-1].numpy()))
+#         rerun.log("/device/wide/depth", rerun.DepthImage(sample["wide"]["depth"][-1].numpy()))
+#         rerun.log("/device/gt/depth", rerun.DepthImage(sample["gt"]["depth"][-1].numpy()))
 
-        per_frame_instances = sample["wide"]["instances"]
-        log_instances(per_frame_instances, prefix="/device/wide")
+#         per_frame_instances = sample["wide"]["instances"]
+#         log_instances(per_frame_instances, prefix="/device/wide")
 
-def get_camera_coords(depth):
-    height, width = depth.shape
-    device = depth.device
+# def get_camera_coords(depth):
+#     height, width = depth.shape
+#     device = depth.device
 
-    # camera xy.
-    camera_coords = torch.stack(
-        torch.meshgrid(
-            torch.arange(0, width, device=device),
-            torch.arange(0, height, device=device), indexing="xy"),
-        dim=-1)
+#     # camera xy.
+#     camera_coords = torch.stack(
+#         torch.meshgrid(
+#             torch.arange(0, width, device=device),
+#             torch.arange(0, height, device=device), indexing="xy"),
+#         dim=-1)
 
-    return camera_coords
+#     return camera_coords
 
-def unproject(depth, K, RT, max_depth=10.0):
-    camera_coords = get_camera_coords(depth) * depth[..., None]
+# def unproject(depth, K, RT, max_depth=10.0):
+#     camera_coords = get_camera_coords(depth) * depth[..., None]
 
-    intrinsics_4x4 = torch.eye(4, device=depth.device)
-    intrinsics_4x4[:3, :3] = K
+#     intrinsics_4x4 = torch.eye(4, device=depth.device)
+#     intrinsics_4x4[:3, :3] = K
 
-    valid = depth > 0
-    if max_depth is not None:
-        valid &= (depth < max_depth)
+#     valid = depth > 0
+#     if max_depth is not None:
+#         valid &= (depth < max_depth)
 
-    depth = depth[..., None]
-    uvd = torch.cat((camera_coords, depth, torch.ones_like(depth)), dim=-1)
+#     depth = depth[..., None]
+#     uvd = torch.cat((camera_coords, depth, torch.ones_like(depth)), dim=-1)
 
-    camera_xyz =  torch.linalg.inv(intrinsics_4x4) @ uvd.view(-1, 4).T
-    world_xyz = RT @ camera_xyz
+#     camera_xyz =  torch.linalg.inv(intrinsics_4x4) @ uvd.view(-1, 4).T
+#     world_xyz = RT @ camera_xyz
 
-    return world_xyz.T[..., :-1].reshape(uvd.shape[0], uvd.shape[1], 3), valid
+#     return world_xyz.T[..., :-1].reshape(uvd.shape[0], uvd.shape[1], 3), valid
 
+# HERE !!!!
 def load_data_and_execute_model(model, dataset, augmentor, preprocessor, score_thresh=0.0, viz_on_gt_points=False):
     is_depth_model = "wide/depth" in augmentor.measurement_keys
     blueprint = rrb.Blueprint(
@@ -219,8 +221,13 @@ def load_data_and_execute_model(model, dataset, augmentor, preprocessor, score_t
     video_id = None
 
     device = model.pixel_mean
-    for sample in dataset:
-        sample_video_id = sample["meta"]["video_id"]
+    for ii, sample in enumerate(dataset):
+        if ii > 60:
+            break
+
+
+        #sample_video_id = sample["meta"]["video_id"]
+        sample_video_id = 0
         if (recording is None) or (video_id != sample_video_id):
             new_recording = rerun.new_recording(
                 application_id=str(sample_video_id), recording_id=uuid.uuid4(), make_default=True)
@@ -233,29 +240,21 @@ def load_data_and_execute_model(model, dataset, augmentor, preprocessor, score_t
             # Keep things in image space, so adjust accordingly.
             rerun.log("/world", rerun.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True) 
 
-        rerun.set_time_seconds("pts", sample["meta"]["timestamp"], recording=recording)
-
-        # -> channels last.
+        # float in seconds? e.g. 273954.896831666
+        timestamp = sample["meta"]["timestamp"]
+        # image is 768x1024x3 numpy image, [0, 255], uint8
         image = np.moveaxis(sample["wide"]["image"][-1].numpy(), 0, -1)        
-        color_camera = rerun.Pinhole(
-            image_from_camera=sample["sensor_info"].wide.image.K[-1].numpy(), resolution=sample["sensor_info"].wide.image.size)
+        # intrinsics K is 3x3 numpy array, float32
+        sensor_info = sample["sensor_info"].wide.image.K[-1].numpy()
+        # resolution is tuple of (width, height) [1024, 768]
+        resolution = sample["sensor_info"].wide.image.size
 
-        if is_depth_model:
-            # Show the depth being sent to the model.            
-            depth_camera = rerun.Pinhole(
-                image_from_camera=sample["sensor_info"].wide.depth.K[-1].numpy(), resolution=sample["sensor_info"].wide.depth.size)
+        rerun.set_time_seconds("pts", timestamp, recording=recording)
+        color_camera = rerun.Pinhole(image_from_camera=sensor_info, resolution=resolution)
 
-        xyzrgb = None
-        if viz_on_gt_points and sample["sensor_info"].has("gt"):
-            # Backproject GT depth to world so we can compare our predictions.
-            depth_gt = sample["gt"]["depth"][-1]
-            matched_image = torch.tensor(np.array(Image.fromarray(image).resize((depth_gt.shape[1], depth_gt.shape[0]))))
-
-            # Feel free to change max_depth, but know CA is only trained up to 5m.
-            xyz, valid = unproject(depth_gt, sample["sensor_info"].gt.depth.K[-1], torch.eye(4), max_depth=10.0)
-            xyzrgb = torch.cat((xyz, matched_image / 255.0), dim=-1)[valid]            
                     
         packaged = augmentor.package(sample)
+
         packaged = move_input_to_current_device(packaged, device)
         packaged = preprocessor.preprocess([packaged])
 
@@ -268,12 +267,12 @@ def load_data_and_execute_model(model, dataset, augmentor, preprocessor, score_t
         rerun.log("/device/wide/image", rerun.Image(image).compress())
         rerun.log("/device/wide/image", color_camera)
 
-        if is_depth_model:
-            rerun.log("/device/wide/depth", rerun.DepthImage(sample["wide"]["depth"][-1].numpy()))
-            rerun.log("/device/wide/depth", depth_camera)
+        # if is_depth_model:
+        #     rerun.log("/device/wide/depth", rerun.DepthImage(sample["wide"]["depth"][-1].numpy()))
+        #     rerun.log("/device/wide/depth", depth_camera)
         
-        if xyzrgb is not None:
-            rerun.log("/world/xyz", rerun.Points3D(positions=xyzrgb[..., :3], colors=xyzrgb[..., 3:], radii=None))        
+        # if xyzrgb is not None:
+        #     rerun.log("/world/xyz", rerun.Points3D(positions=xyzrgb[..., :3], colors=xyzrgb[..., 3:], radii=None))        
 
         log_instances(pred_instances, prefix="/device/wide", boxes_3d_name="pred_boxes_3d", ids_name=None, log_instances_name="pred_instances")
 
@@ -330,12 +329,12 @@ if __name__ == "__main__":
             load_arkit_depth=not args.no_depth,
             use_cache=use_cache)
 
-    if args.viz_only:
-        if args.every_nth_frame is not None:
-            dataset = itertools.islice(dataset, 0, None, args.every_nth_frame)
+    # if args.viz_only:
+    #     if args.every_nth_frame is not None:
+    #         dataset = itertools.islice(dataset, 0, None, args.every_nth_frame)
         
-        load_data_and_visualize(dataset)
-        sys.exit(0)
+    #     load_data_and_visualize(dataset)
+    #     sys.exit(0)
 
     assert args.model_path is not None
     checkpoint = torch.load(args.model_path, map_location=args.device or "cpu")["model"]
