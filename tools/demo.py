@@ -222,7 +222,7 @@ def load_data_and_execute_model(model, dataset, augmentor, preprocessor, score_t
 
     device = model.pixel_mean
     for ii, sample in enumerate(dataset):
-        if ii > 60:
+        if ii > 180:
             break
 
 
