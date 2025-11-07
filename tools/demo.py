@@ -31,6 +31,8 @@ from PIL import Image
 from scipy.spatial.transform import Rotation
 
 from surreal.fov3d.utils.file_io import ObbCsvWriter2
+from surreal.fov3d.utils.obb import ObbTW
+from surreal.fov3d.utils.pose import PoseTW
 
 
 def move_device_like(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
@@ -320,10 +322,27 @@ def load_data_and_execute_model(
             log_instances_name="pred_instances",
         )
 
-        # R = pred_instances.pred_boxes_3d.R
-        # center = pred_instances.pred_boxes_3d.center
-        # whl = pred_instances.pred_boxes_3d.whl
-        # writer.write_cutr(timestamp, R, center, whl)
+        R = pred_instances.pred_boxes_3d.R.clone()
+        center = pred_instances.pred_boxes_3d.center.clone()
+        whl = pred_instances.pred_boxes_3d.whl.clone()
+        T_wo = PoseTW.from_Rt(R, whl)
+        # T_wo = T_nw_w @ T_wo  # rotate by 90 degrees around x-axis
+        bb3_sc = whl
+        xmin = -bb3_sc[:, 0] / 2
+        xmax = bb3_sc[:, 0] / 2
+        ymin = -bb3_sc[:, 1] / 2
+        ymax = bb3_sc[:, 1] / 2
+        zmin = -bb3_sc[:, 2] / 2
+        zmax = bb3_sc[:, 2] / 2
+        sz = torch.stack([xmin, xmax, ymin, ymax, zmin, zmax], dim=-1)
+        N = sz.shape[0]
+        inst_ids = torch.arange(N)
+        sem_ids = 32 + torch.zeros(N)  # 32 is Anything
+        all_obbs = ObbTW.from_lmc(
+            bb3_object=sz, T_world_object=T_wo, sem_id=sem_ids, inst_id=inst_ids
+        )
+        sem_id_to_name = {32: "Anything"}
+        writer.write(all_obbs, timestamp, sem_id_to_name)
 
 
 if __name__ == "__main__":
