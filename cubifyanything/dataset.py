@@ -161,7 +161,10 @@ class CubifyAnythingDataset(webdataset.DataPipeline):
 
         self.first_timestamp = None
 
-        root_dir = os.path.expanduser(f"~/boxy_data/tutorial_office")
+        # root_dir = os.path.expanduser(f"~/boxy_data/tutorial_office")
+        root_dir = os.path.expanduser(
+            f"~/boxy_data/nym_loc10_newbasemap_463617026552443"
+        )
         # self.loader = SSTLoader(
         #    root_dir,
         #    camera="slaml",
@@ -293,6 +296,105 @@ class CubifyAnythingDataset(webdataset.DataPipeline):
                     continue
 
             yield self._map_sample(sample)
+
+
+class AriaCubifyLoader:
+    def __init__(self, root_dir):
+        self.root_dir = root_dir
+        # root_dir = os.path.expanduser(f"~/boxy_data/tutorial_office")
+
+        # self.loader = SSTLoader(
+        #    root_dir,
+        #    camera="slaml",
+        #    with_calib=True,
+        #    with_traj=True,
+        #    with_sdp=False,
+        # )
+        self.loader2 = Loader(root_dir, camera="slaml")  # slaml or rgb
+        self.idx = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        idx = self.idx
+        img_torch, cam, T_wr, timestamp = self.loader2.load_one(idx)
+        print("USING OLD LOADER")
+        video_id = 0
+
+        # out = self.loader.load_one(idx, pinhole=True, unrotate=True)
+        # img_torch = (out["img"] * 255).byte()
+        # cam = out["cam"]
+        # T_wr = out["T_world_rig"]
+        # print("USING SST LOADER
+
+        # print(T_wr.t)
+        # print(T_wc.t)
+        # exit(1)
+
+        HH = img_torch.shape[2]
+        WW = img_torch.shape[3]
+        img_size = (HH, WW)
+        K = torch.eye(3)
+        K[0, 0] = cam.f[0]
+        K[1, 1] = cam.f[1]
+        K[0, 2] = cam.c[0]
+        K[1, 2] = cam.c[1]
+        K = K[None]
+
+        T_wc = T_wr @ cam.T_camera_rig.inverse()
+        print("T_world_rig", T_wr.t)
+        print("T_cam_rig", cam.T_camera_rig.t)
+        print("f", K)
+        print(f"height width {HH} {WW}")
+
+        # wide.image = ImageMeasurementInfo(
+        #    size=parse_size(sample["_wide/image/size"]),
+        #    K=parse_transform_3x3(sample["wide/image/k"])[None],
+        # )
+        # At this point, everything is in camera coordinates.
+        wide = PosedSensorInfo()
+        wide.RT = torch.eye(4)[None]
+        wide.image = ImageMeasurementInfo(size=img_size, K=K)
+
+        # if self.load_arkit_depth:
+        #    wide.depth = DepthMeasurementInfo(
+        #        size=parse_size(sample["_wide/depth/size"]),
+        #        K=parse_transform_3x3(sample["wide/depth/k"])[None])
+        # gt = PosedSensorInfo()
+        # gt.RT = parse_transform_4x4(sample["gt/rt"])[None]
+
+        # torch.set_printoptions(precision=4, sci_mode=False)
+        ## TODO(dd): set this! need to load trajectory.
+        # wide.T_gravity = parse_transform_3x3(sample["wide/t_gravity"])[None]
+        # print(wide.T_gravity)
+        # T_gravity2 = get_camera_to_gravity_transform(gt.RT, ImageOrientation.UPRIGHT, target=ImageOrientation.UPRIGHT)
+        # print(T_gravity2)
+        T_gravity3 = get_camera_to_gravity_transform(
+            T_wc.matrix, ImageOrientation.UPRIGHT, target=ImageOrientation.UPRIGHT
+        )
+        # print(T_gravity3)
+        wide.T_gravity = T_gravity3[None]
+
+        sensor_info = SensorArrayInfo()
+        sensor_info.wide = wide
+        # sensor_info.gt = gt
+
+        # img_torch = img_torch[None]
+
+        result = dict(
+            sensor_info=sensor_info,
+            wide=dict(
+                image=img_torch,
+            ),
+            # instances=read_instances(sample["wide/instances"])),
+            # gt=dict(
+            #    # NOTE: 0.0 values here correspond to failed registration areas.
+            #    depth=read_image_bytes(sample["gt/depth"], expected_size=gt.depth.size)[None].float() / MM_TO_M),
+            meta=dict(video_id=video_id, timestamp=timestamp),
+        )
+        self.idx += 1
+        return result
 
 
 if __name__ == "__main__":

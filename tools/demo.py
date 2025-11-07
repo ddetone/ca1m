@@ -24,11 +24,13 @@ from cubifyanything.boxes import GeneralInstance3DBoxes
 # from cubifyanything.capture_stream import CaptureDataset
 from cubifyanything.color import random_color
 from cubifyanything.cubify_transformer import make_cubify_transformer
-from cubifyanything.dataset import CubifyAnythingDataset
+from cubifyanything.dataset import AriaCubifyLoader, CubifyAnythingDataset
 from cubifyanything.instances import Instances3D
 from cubifyanything.preprocessor import Augmentor, Preprocessor
 from PIL import Image
 from scipy.spatial.transform import Rotation
+
+from surreal.fov3d.utils.file_io import ObbCsvWriter2
 
 
 def move_device_like(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
@@ -207,7 +209,7 @@ def log_instances(
 
 # HERE !!!!
 def load_data_and_execute_model(
-    model, dataset, augmentor, preprocessor, score_thresh=0.0, viz_on_gt_points=False
+    model, dataset, augmentor, preprocessor, score_thresh=0.0
 ):
     is_depth_model = "wide/depth" in augmentor.measurement_keys
     blueprint = rrb.Blueprint(
@@ -251,9 +253,12 @@ def load_data_and_execute_model(
     video_id = None
 
     device = model.pixel_mean
+
+    root_dir = dataset.root_dir
+    out_path = os.path.join(root_dir, "cutr_frame_obbs.csv")
+    writer = ObbCsvWriter2(out_path)
+
     for ii, sample in enumerate(dataset):
-        if ii > 180:
-            break
 
         # sample_video_id = sample["meta"]["video_id"]
         sample_video_id = 0
@@ -315,13 +320,20 @@ def load_data_and_execute_model(
             log_instances_name="pred_instances",
         )
 
+        # R = pred_instances.pred_boxes_3d.R
+        # center = pred_instances.pred_boxes_3d.center
+        # whl = pred_instances.pred_boxes_3d.whl
+        # writer.write_cutr(timestamp, R, center, whl)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
-        "dataset_path",
-        help='Path to the directory containing the .tar files, the full path to a single tar file (recommended), or a path to a txt file containing HTTP links. Using the value "stream" will attempt to stream from your device using the NeRFCapture app',
+        "--seq",
+        type=str,
+        default="nym_loc10_newbasemap_463617026552443",
+        help="boxy sequence name",
     )
     parser.add_argument("--model-path", help="Path to the model to load")
     parser.add_argument(
@@ -338,12 +350,6 @@ if __name__ == "__main__":
         help="Skip loading a model and only visualize data.",
     )
     parser.add_argument(
-        "--viz-on-gt-points",
-        default=False,
-        action="store_true",
-        help="Backproject the GT depth to form a point cloud in order to visualize the predictions",
-    )
-    parser.add_argument(
         "--device",
         default="cpu",
         help="Which device to push the model to (cpu, mps, cuda)",
@@ -357,60 +363,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print("Command Line Args:", args)
 
-    dataset_path = args.dataset_path
     use_cache = False
 
-    if dataset_path == "stream":
-        # dataset = CaptureDataset()
-        pass
-    else:
-        dataset_files = []
-
-        # Allow the user to specify a single tar or a txt file containing an http link per line.
-        if os.path.isfile(dataset_path):
-            if dataset_path.endswith(".txt"):
-                with open(dataset_path, "r") as dataset_file:
-                    dataset_files = [l.strip() for l in dataset_file.readlines()]
-
-                # Cache these files locally to prevent repeated downlods.
-                use_cache = True
-            else:
-                args.video_ids = None
-                dataset_files = [dataset_path]
-        else:
-            # Try to glob all files matching ca1m-*.tar
-            dataset_files = glob.glob(os.path.join(dataset_path, "ca1m-*.tar"))
-            if len(dataset_files) == 0:
-                raise ValueError(
-                    f"Failed to find any .tar files matching ca1m- prefix at {dataset_path}"
-                )
-
-        if args.video_ids is not None:
-            dataset_files = [
-                df
-                for df in dataset_files
-                if Path(df).with_suffix("").name.split("-")[-1] in args.video_ids
-            ]
-
-        if len(dataset_files) == 0:
-            raise ValueError("No data was found")
-
-        dataset = CubifyAnythingDataset(
-            [
-                Path(df).as_uri() if not df.startswith("https://") else df
-                for df in dataset_files
-            ],
-            yield_world_instances=args.viz_only,
-            load_arkit_depth=not args.no_depth,
-            use_cache=use_cache,
-        )
-
-    # if args.viz_only:
-    #     if args.every_nth_frame is not None:
-    #         dataset = itertools.islice(dataset, 0, None, args.every_nth_frame)
-
-    #     load_data_and_visualize(dataset)
-    #     sys.exit(0)
+    root_dir = os.path.expanduser(f"~/boxy_data/{args.seq}")
+    dataset = AriaCubifyLoader(root_dir)
 
     assert args.model_path is not None
     checkpoint = torch.load(args.model_path, map_location=args.device or "cpu")["model"]
@@ -432,10 +388,10 @@ if __name__ == "__main__":
     ).eval()
     model.load_state_dict(checkpoint)
 
-    # No need for ARKit depth if running an RGB only model.
-    dataset.load_arkit_depth = is_depth_model
-    if args.every_nth_frame is not None:
-        dataset = itertools.islice(dataset, 0, None, args.every_nth_frame)
+    ## No need for ARKit depth if running an RGB only model.
+    # dataset.load_arkit_depth = is_depth_model
+    # if args.every_nth_frame is not None:
+    #    dataset = itertools.islice(dataset, 0, None, args.every_nth_frame)
 
     augmentor = Augmentor(
         ("wide/image", "wide/depth") if is_depth_model else ("wide/image",)
@@ -451,5 +407,4 @@ if __name__ == "__main__":
         augmentor,
         preprocessor,
         score_thresh=args.score_thresh,
-        viz_on_gt_points=args.viz_on_gt_points,
     )
