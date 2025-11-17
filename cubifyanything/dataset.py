@@ -132,36 +132,204 @@ def read_instances(data):
     return instances
 
 
-class CubifyAnythingDataset(webdataset.DataPipeline):
+#class CubifyAnythingDataset(webdataset.DataPipeline):
+#    def __init__(
+#        self,
+#        url,
+#        seq,
+#        box_dof=BoxDOF.GravityAligned,
+#        yield_world_instances=False,
+#        load_arkit_depth=True,
+#        use_cache=False,
+#    ):
+#        self._url = url
+#        self._yield_world_instances = yield_world_instances
+#        self._use_cache = use_cache
+#
+#        super(CubifyAnythingDataset, self).__init__(
+#            webdataset.SimpleShardList(url),
+#            (
+#                custom_cached_url_opener
+#                if self._use_cache
+#                else webdataset.tariterators.url_opener
+#            ),
+#            webdataset.tariterators.tar_file_expander,
+#            group_by_video_and_timestamp,
+#            self._map_samples,
+#        )
+#
+#        self.load_arkit_depth = load_arkit_depth
+#
+#        self.first_timestamp = None
+#
+#        root_dir = os.path.expanduser(f"~/boxy_data/{seq}")
+#        # self.loader = SSTLoader(
+#        #    root_dir,
+#        #    camera="slaml",
+#        #    with_calib=True,
+#        #    with_traj=True,
+#        #    with_sdp=False,
+#        # )
+#        self.loader2 = Loader(root_dir, camera="slaml")  # slaml or rgb
+#        self.root_dir = root_dir
+#
+#    def _map_sample(self, sample):
+#        video_id, timestamp = sample["__key__"].split("/")
+#        video_id = int(video_id)
+#        if timestamp == "world":
+#            return dict(
+#                world=dict(instances=read_instances(sample["gt/instances"])),
+#                meta=dict(video_id=video_id),
+#            )
+#
+#        # gt_depth_size = parse_size(sample["_gt/depth/size"])
+#
+#        timestamp = float(timestamp) / 1e9
+#
+#        # At this point, everything is in camera coordinates.
+#        wide = PosedSensorInfo()
+#        wide.RT = torch.eye(4)[None]
+#
+#        # wide.image = ImageMeasurementInfo(
+#        #    size=parse_size(sample["_wide/image/size"]),
+#        #    K=parse_transform_3x3(sample["wide/image/k"])[None],
+#        # )
+#        # root_dir = os.path.expanduser(f"~/boxy_data/aeo_seq21_188862233995371")
+#
+#        if self.first_timestamp is None:
+#            self.first_timestamp = timestamp
+#        idx = int((timestamp - self.first_timestamp) * 10.0)
+#        idx += 30  # skip first 3 seconds
+#
+#        img_torch, cam, T_wr, ts_ns = self.loader2.load_one(idx)
+#        print("USING OLD LOADER")
+#
+#        # out = self.loader.load_one(idx, pinhole=True, unrotate=True)
+#        # img_torch = (out["img"] * 255).byte()
+#        # cam = out["cam"]
+#        # T_wr = out["T_world_rig"]
+#        # print("USING SST LOADER")
+#
+#        # print(T_wr.t)
+#        # print(T_wc.t)
+#        # exit(1)
+#
+#        HH = img_torch.shape[2]
+#        WW = img_torch.shape[3]
+#        img_size = (HH, WW)
+#        K = torch.eye(3)
+#        K[0, 0] = cam.f[0]
+#        K[1, 1] = cam.f[1]
+#        K[0, 2] = cam.c[0]
+#        K[1, 2] = cam.c[1]
+#        K = K[None]
+#
+#        T_wc = T_wr @ cam.T_camera_rig.inverse()
+#        print("T_world_rig", T_wr.t)
+#        print("T_cam_rig", cam.T_camera_rig.t)
+#        print("f", K)
+#        print(f"height width {HH} {WW}")
+#
+#        # wide.image = ImageMeasurementInfo(
+#        #    size=parse_size(sample["_wide/image/size"]),
+#        #    K=parse_transform_3x3(sample["wide/image/k"])[None],
+#        # )
+#        wide.image = ImageMeasurementInfo(size=img_size, K=K)
+#
+#        # if self.load_arkit_depth:
+#        #    wide.depth = DepthMeasurementInfo(
+#        #        size=parse_size(sample["_wide/depth/size"]),
+#        #        K=parse_transform_3x3(sample["wide/depth/k"])[None])
+#        gt = PosedSensorInfo()
+#        gt.RT = parse_transform_4x4(sample["gt/rt"])[None]
+#
+#        # torch.set_printoptions(precision=4, sci_mode=False)
+#        ## TODO(dd): set this! need to load trajectory.
+#        # wide.T_gravity = parse_transform_3x3(sample["wide/t_gravity"])[None]
+#        # print(wide.T_gravity)
+#        # T_gravity2 = get_camera_to_gravity_transform(gt.RT, ImageOrientation.UPRIGHT, target=ImageOrientation.UPRIGHT)
+#        # print(T_gravity2)
+#        T_gravity3 = get_camera_to_gravity_transform(
+#            T_wc.matrix, ImageOrientation.UPRIGHT, target=ImageOrientation.UPRIGHT
+#        )
+#        # print(T_gravity3)
+#        wide.T_gravity = T_gravity3[None]
+#
+#        sensor_info = SensorArrayInfo()
+#        sensor_info.wide = wide
+#        # sensor_info.gt = gt
+#
+#        # img_torch = img_torch[None]
+#
+#        result = dict(
+#            sensor_info=sensor_info,
+#            wide=dict(
+#                image=img_torch,
+#            ),
+#            # instances=read_instances(sample["wide/instances"])),
+#            # gt=dict(
+#            #    # NOTE: 0.0 values here correspond to failed registration areas.
+#            #    depth=read_image_bytes(sample["gt/depth"], expected_size=gt.depth.size)[None].float() / MM_TO_M),
+#            meta=dict(video_id=video_id, timestamp=timestamp),
+#        )
+#        # result = dict(
+#        #    sensor_info=sensor_info,
+#        #    wide=dict(
+#        #        image=read_image_bytes(sample["wide/image"], expected_size=wide.image.size)[None],
+#        #        instances=read_instances(sample["wide/instances"])),
+#        #    #gt=dict(
+#        #    #    # NOTE: 0.0 values here correspond to failed registration areas.
+#        #    #    depth=read_image_bytes(sample["gt/depth"], expected_size=gt.depth.size)[None].float() / MM_TO_M),
+#        #    meta=dict(video_id=video_id, timestamp=timestamp))
+#
+#        # if self.load_arkit_depth:
+#        #    result["wide"]["depth"] = read_image_bytes(sample["wide/depth"], expected_size=wide.depth.size)[None].float() / MM_TO_M
+#        result["T_wc"] = T_wc
+#
+#        return result
+#
+#    def _map_samples(self, samples):
+#        for sample in samples:
+#            # Don't map the world instances unless requested to (since these are timeless).
+#            if sample["__key__"].endswith("/world"):
+#                if not self._yield_world_instances:
+#                    continue
+#
+#            yield self._map_sample(sample)
+
+
+class FakeCubifyAnythingDataset():
     def __init__(
         self,
-        url,
-        box_dof=BoxDOF.GravityAligned,
-        yield_world_instances=False,
-        load_arkit_depth=True,
-        use_cache=False,
+        #url,
+        seq,
+        #box_dof=BoxDOF.GravityAligned,
+        #yield_world_instances=False,
+        #load_arkit_depth=True,
+        #use_cache=False,
     ):
-        self._url = url
-        self._yield_world_instances = yield_world_instances
-        self._use_cache = use_cache
+        #self._url = url
+        #self._yield_world_instances = yield_world_instances
+        #self._use_cache = use_cache
 
-        super(CubifyAnythingDataset, self).__init__(
-            webdataset.SimpleShardList(url),
-            (
-                custom_cached_url_opener
-                if self._use_cache
-                else webdataset.tariterators.url_opener
-            ),
-            webdataset.tariterators.tar_file_expander,
-            group_by_video_and_timestamp,
-            self._map_samples,
-        )
+        #super(CubifyAnythingDataset, self).__init__(
+        #    webdataset.SimpleShardList(url),
+        #    (
+        #        custom_cached_url_opener
+        #        if self._use_cache
+        #        else webdataset.tariterators.url_opener
+        #    ),
+        #    webdataset.tariterators.tar_file_expander,
+        #    group_by_video_and_timestamp,
+        #    self._map_samples,
+        #)
 
-        self.load_arkit_depth = load_arkit_depth
+        #self.load_arkit_depth = load_arkit_depth
 
-        self.first_timestamp = None
+        #self.first_timestamp = None
+        self.index = 0
 
-        root_dir = os.path.expanduser(f"~/boxy_data/tutorial_office")
+        root_dir = os.path.expanduser(f"~/boxy_data/{seq}")
         # self.loader = SSTLoader(
         #    root_dir,
         #    camera="slaml",
@@ -170,19 +338,24 @@ class CubifyAnythingDataset(webdataset.DataPipeline):
         #    with_sdp=False,
         # )
         self.loader2 = Loader(root_dir, camera="slaml")  # slaml or rgb
+        self.root_dir = root_dir
 
-    def _map_sample(self, sample):
-        video_id, timestamp = sample["__key__"].split("/")
-        video_id = int(video_id)
-        if timestamp == "world":
-            return dict(
-                world=dict(instances=read_instances(sample["gt/instances"])),
-                meta=dict(video_id=video_id),
-            )
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        #video_id, timestamp = sample["__key__"].split("/")
+        #video_id = int(video_id)
+        #if timestamp == "world":
+        #    return dict(
+        #        world=dict(instances=read_instances(sample["gt/instances"])),
+        #        meta=dict(video_id=video_id),
+        #    )
+        video_id = 0
 
         # gt_depth_size = parse_size(sample["_gt/depth/size"])
 
-        timestamp = float(timestamp) / 1e9
+        #timestamp = float(timestamp) / 1e9
 
         # At this point, everything is in camera coordinates.
         wide = PosedSensorInfo()
@@ -194,13 +367,16 @@ class CubifyAnythingDataset(webdataset.DataPipeline):
         # )
         # root_dir = os.path.expanduser(f"~/boxy_data/aeo_seq21_188862233995371")
 
-        if self.first_timestamp is None:
-            self.first_timestamp = timestamp
-        idx = int((timestamp - self.first_timestamp) * 10.0)
-        idx += 30  # skip first 3 seconds
+        #if self.first_timestamp is None:
+        #    self.first_timestamp = timestamp
+        #idx = int((timestamp - self.first_timestamp) * 10.0)
+        #idx += 30  # skip first 3 seconds
+        idx = self.index
 
-        img_torch, cam, T_wr = self.loader2.load_one(idx)
+        img_torch, cam, T_wr, ts_ns = self.loader2.load_one(idx)
         print("USING OLD LOADER")
+
+        timestamp = ts_ns / 1e9
 
         # out = self.loader.load_one(idx, pinhole=True, unrotate=True)
         # img_torch = (out["img"] * 255).byte()
@@ -238,8 +414,8 @@ class CubifyAnythingDataset(webdataset.DataPipeline):
         #    wide.depth = DepthMeasurementInfo(
         #        size=parse_size(sample["_wide/depth/size"]),
         #        K=parse_transform_3x3(sample["wide/depth/k"])[None])
-        gt = PosedSensorInfo()
-        gt.RT = parse_transform_4x4(sample["gt/rt"])[None]
+        #gt = PosedSensorInfo()
+        #gt.RT = parse_transform_4x4(sample["gt/rt"])[None]
 
         # torch.set_printoptions(precision=4, sci_mode=False)
         ## TODO(dd): set this! need to load trajectory.
@@ -282,6 +458,9 @@ class CubifyAnythingDataset(webdataset.DataPipeline):
 
         # if self.load_arkit_depth:
         #    result["wide"]["depth"] = read_image_bytes(sample["wide/depth"], expected_size=wide.depth.size)[None].float() / MM_TO_M
+        result["T_wc"] = T_wc
+
+        self.index += 1
 
         return result
 
@@ -293,7 +472,6 @@ class CubifyAnythingDataset(webdataset.DataPipeline):
                     continue
 
             yield self._map_sample(sample)
-
 
 if __name__ == "__main__":
     # dataset = CubifyAnythingDataset("file:/tmp/lupine-train-49739919.tar")

@@ -24,11 +24,15 @@ from cubifyanything.boxes import GeneralInstance3DBoxes
 # from cubifyanything.capture_stream import CaptureDataset
 from cubifyanything.color import random_color
 from cubifyanything.cubify_transformer import make_cubify_transformer
-from cubifyanything.dataset import CubifyAnythingDataset
+from cubifyanything.dataset import FakeCubifyAnythingDataset
 from cubifyanything.instances import Instances3D
 from cubifyanything.preprocessor import Augmentor, Preprocessor
 from PIL import Image
 from scipy.spatial.transform import Rotation
+
+from surreal.fov3d.utils.file_io import ObbCsvWriter2
+from surreal.fov3d.utils.obb import ObbTW
+from surreal.fov3d.utils.pose import PoseTW, rotation_from_euler
 
 
 def move_device_like(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
@@ -250,10 +254,17 @@ def load_data_and_execute_model(
     recording = None
     video_id = None
 
+    root_dir = dataset.root_dir
+    out_path = os.path.join(root_dir, "cutr_frame_obbs.csv")
+    writer = ObbCsvWriter2(out_path)
+
     device = model.pixel_mean
+    count = 0
     for ii, sample in enumerate(dataset):
-        if ii > 180:
+        if count > 120:
             break
+        if ii % 15 != 0:
+            continue
 
         # sample_video_id = sample["meta"]["video_id"]
         sample_video_id = 0
@@ -315,14 +326,61 @@ def load_data_and_execute_model(
             log_instances_name="pred_instances",
         )
 
+        T_wc = sample["T_wc"].cpu().float()
+
+        R = pred_instances.pred_boxes_3d.R.clone().cpu().float()
+
+        center = pred_instances.pred_boxes_3d.center.clone().cpu().float()
+        whl = pred_instances.pred_boxes_3d.whl.clone().cpu().float()
+        T_co = PoseTW.from_Rt(R, center)
+        # T_co = PoseTW.from_Rt(R, center).inverse()
+
+        T_wo = T_wc @ T_co
+        # T_wo = T_co
+
+
+        # rotate by 90 degrees around z-axis, not sure why but probably a convention differnece.
+        R_w = T_wo.R
+        R_nw_w = rotation_from_euler(torch.tensor([0, 0, np.pi / 2]).reshape(1, 3))
+        R_nw = R_nw_w @ R_w
+        T_wo = PoseTW.from_Rt(R_nw, T_wo.t)
+
+
+
+        #T_nw_w = rotation_from_euler(torch.tensor([0, 0, np.pi / 2], device=device))
+        #T_nw_w = rotation_from_euler(torch.tensor([np.pi / 2, 0, 0], device=device))
+        ## Rotate world by -90 degrees around x-axis.
+        #roll = -np.pi / 2
+        #R_nw_w = rotation_from_euler(torch.tensor([[roll, 0.0, 0.0]]))[0]
+        #T_nw_w = PoseTW.from_Rt(R_nw_w, torch.zeros(3))
+        #T_wo = T_nw_w @ T_wo  # rotate by 90 degrees around x-axis
+
+        bb3_sc = whl
+        xmin = -bb3_sc[:, 0] / 2
+        xmax = bb3_sc[:, 0] / 2
+        ymin = -bb3_sc[:, 1] / 2
+        ymax = bb3_sc[:, 1] / 2
+        zmin = -bb3_sc[:, 2] / 2
+        zmax = bb3_sc[:, 2] / 2
+        sz = torch.stack([xmin, xmax, ymin, ymax, zmin, zmax], dim=-1)
+        N = sz.shape[0]
+        inst_ids = torch.arange(N).float()
+        sem_ids = 32 + torch.zeros(N)  # 32 is Anything
+        all_obbs = ObbTW.from_lmc(
+            bb3_object=sz, T_world_object=T_wo, sem_id=sem_ids, inst_id=inst_ids
+        )
+        sem_id_to_name = {32: "Anything"}
+        writer.write(all_obbs, int(timestamp * 1e9), sem_id_to_name)
+        count += 1
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "dataset_path",
-        help='Path to the directory containing the .tar files, the full path to a single tar file (recommended), or a path to a txt file containing HTTP links. Using the value "stream" will attempt to stream from your device using the NeRFCapture app',
-    )
+    # parser.add_argument(
+    #     "dataset_path",
+    #     help='Path to the directory containing the .tar files, the full path to a single tar file (recommended), or a path to a txt file containing HTTP links. Using the value "stream" will attempt to stream from your device using the NeRFCapture app',
+    # )
     parser.add_argument("--model-path", help="Path to the model to load")
     parser.add_argument(
         "--no-depth", default=False, action="store_true", help="Skip loading depth."
@@ -353,57 +411,64 @@ if __name__ == "__main__":
         nargs="+",
         help="Subset of videos to execute on. By default, all. Ignored if a tar file is explicitly given or in stream mode.",
     )
+    parser.add_argument(
+        "--seq",
+        type=str,
+        default="nym_loc10_newbasemap_463617026552443",
+    )
 
     args = parser.parse_args()
     print("Command Line Args:", args)
 
-    dataset_path = args.dataset_path
-    use_cache = False
+    # dataset_path = args.dataset_path
+    # use_cache = False
 
-    if dataset_path == "stream":
-        # dataset = CaptureDataset()
-        pass
-    else:
-        dataset_files = []
+    # if dataset_path == "stream":
+    #     # dataset = CaptureDataset()
+    #     pass
+    # else:
+    #     dataset_files = []
 
-        # Allow the user to specify a single tar or a txt file containing an http link per line.
-        if os.path.isfile(dataset_path):
-            if dataset_path.endswith(".txt"):
-                with open(dataset_path, "r") as dataset_file:
-                    dataset_files = [l.strip() for l in dataset_file.readlines()]
+    #     # Allow the user to specify a single tar or a txt file containing an http link per line.
+    #     if os.path.isfile(dataset_path):
+    #         if dataset_path.endswith(".txt"):
+    #             with open(dataset_path, "r") as dataset_file:
+    #                 dataset_files = [l.strip() for l in dataset_file.readlines()]
 
-                # Cache these files locally to prevent repeated downlods.
-                use_cache = True
-            else:
-                args.video_ids = None
-                dataset_files = [dataset_path]
-        else:
-            # Try to glob all files matching ca1m-*.tar
-            dataset_files = glob.glob(os.path.join(dataset_path, "ca1m-*.tar"))
-            if len(dataset_files) == 0:
-                raise ValueError(
-                    f"Failed to find any .tar files matching ca1m- prefix at {dataset_path}"
-                )
+    #             # Cache these files locally to prevent repeated downlods.
+    #             use_cache = True
+    #         else:
+    #             args.video_ids = None
+    #             dataset_files = [dataset_path]
+    #     else:
+    #         # Try to glob all files matching ca1m-*.tar
+    #         dataset_files = glob.glob(os.path.join(dataset_path, "ca1m-*.tar"))
+    #         if len(dataset_files) == 0:
+    #             raise ValueError(
+    #                 f"Failed to find any .tar files matching ca1m- prefix at {dataset_path}"
+    #             )
 
-        if args.video_ids is not None:
-            dataset_files = [
-                df
-                for df in dataset_files
-                if Path(df).with_suffix("").name.split("-")[-1] in args.video_ids
-            ]
+    #     if args.video_ids is not None:
+    #         dataset_files = [
+    #             df
+    #             for df in dataset_files
+    #             if Path(df).with_suffix("").name.split("-")[-1] in args.video_ids
+    #         ]
 
-        if len(dataset_files) == 0:
-            raise ValueError("No data was found")
+    #     if len(dataset_files) == 0:
+    #         raise ValueError("No data was found")
 
-        dataset = CubifyAnythingDataset(
-            [
-                Path(df).as_uri() if not df.startswith("https://") else df
-                for df in dataset_files
-            ],
-            yield_world_instances=args.viz_only,
-            load_arkit_depth=not args.no_depth,
-            use_cache=use_cache,
-        )
+        # dataset = CubifyAnythingDataset(
+        #     [
+        #         Path(df).as_uri() if not df.startswith("https://") else df
+        #         for df in dataset_files
+        #     ],
+        #     args.seq,
+        #     yield_world_instances=args.viz_only,
+        #     load_arkit_depth=not args.no_depth,
+        #     use_cache=use_cache,
+        # )
+    dataset = FakeCubifyAnythingDataset(args.seq)
 
     # if args.viz_only:
     #     if args.every_nth_frame is not None:
@@ -432,10 +497,10 @@ if __name__ == "__main__":
     ).eval()
     model.load_state_dict(checkpoint)
 
-    # No need for ARKit depth if running an RGB only model.
-    dataset.load_arkit_depth = is_depth_model
-    if args.every_nth_frame is not None:
-        dataset = itertools.islice(dataset, 0, None, args.every_nth_frame)
+    # # No need for ARKit depth if running an RGB only model.
+    # dataset.load_arkit_depth = is_depth_model
+    # if args.every_nth_frame is not None:
+    #     dataset = itertools.islice(dataset, 0, None, args.every_nth_frame)
 
     augmentor = Augmentor(
         ("wide/image", "wide/depth") if is_depth_model else ("wide/image",)
