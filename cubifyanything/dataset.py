@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, Optional, Set, Tuple
 
 import numpy as np
-import tifffile
+# import tifffile
 import torch
 import webdataset
 
@@ -25,7 +25,7 @@ from read import Loader
 
 from surreal.fov3d.utils.sst_loader import SSTLoader
 
-from webdataset.cache import cached_url_opener
+# from webdataset.cache import cached_url_opener
 from webdataset.handlers import reraise_exception
 
 
@@ -34,9 +34,9 @@ def custom_pipe_cleaner(spec):
     return "/".join(Path(spec).parts[-2:])
 
 
-custom_cached_url_opener = functools.partial(
-    cached_url_opener, cache_dir="data", url_to_name=custom_pipe_cleaner
-)
+# custom_cached_url_opener = functools.partial(
+#     cached_url_opener, cache_dir="data", url_to_name=custom_pipe_cleaner
+# )
 
 PREFIX_SEPARATOR = "."
 WORLD_PREFIX = "world"
@@ -83,8 +83,9 @@ def read_image_bytes(image_bytes, expected_size, channels_first=True):
         # PNG.
         image = np.array(Image.open(io.BytesIO(image_bytes)))
     elif image_bytes.startswith(b"II*\x00") or image_bytes.startswith(b"MM\x00*"):
-        # TIFF.
-        image = tifffile.imread(io.BytesIO(image_bytes))
+        ## TIFF.
+        #image = tifffile.imread(io.BytesIO(image_bytes))
+        raise ValueError("TIFF not supported")
     else:
         raise ValueError("Unknown image format")
 
@@ -330,63 +331,44 @@ class FakeCubifyAnythingDataset():
         self.index = 0
 
         root_dir = os.path.expanduser(f"~/boxy_data/{seq}")
-        # self.loader = SSTLoader(
-        #    root_dir,
-        #    camera="slaml",
-        #    with_calib=True,
-        #    with_traj=True,
-        #    with_sdp=False,
-        # )
-        self.loader2 = Loader(root_dir, camera="slaml")  # slaml or rgb
+
+        self.loader = SSTLoader(
+           root_dir,
+           camera="rgb",
+           with_traj=True,
+           with_sdp=False,
+           pinhole=True,
+           unrotate=True,
+           resize=(720, 720),
+        )
+        #self.loader2 = Loader(root_dir, camera="slaml")  # slaml or rgb
         self.root_dir = root_dir
+        self.seq_name = seq
+        self.iter_loader= iter(self.loader)
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        #video_id, timestamp = sample["__key__"].split("/")
-        #video_id = int(video_id)
-        #if timestamp == "world":
-        #    return dict(
-        #        world=dict(instances=read_instances(sample["gt/instances"])),
-        #        meta=dict(video_id=video_id),
-        #    )
+        if self.index >= self.loader.length:
+            raise StopIteration
+
         video_id = 0
 
-        # gt_depth_size = parse_size(sample["_gt/depth/size"])
 
-        #timestamp = float(timestamp) / 1e9
+        out = False
+        while out is False:
+            out = next(self.iter_loader)
 
         # At this point, everything is in camera coordinates.
         wide = PosedSensorInfo()
         wide.RT = torch.eye(4)[None]
-
-        # wide.image = ImageMeasurementInfo(
-        #    size=parse_size(sample["_wide/image/size"]),
-        #    K=parse_transform_3x3(sample["wide/image/k"])[None],
-        # )
-        # root_dir = os.path.expanduser(f"~/boxy_data/aeo_seq21_188862233995371")
-
-        #if self.first_timestamp is None:
-        #    self.first_timestamp = timestamp
-        #idx = int((timestamp - self.first_timestamp) * 10.0)
-        #idx += 30  # skip first 3 seconds
-        idx = self.index
-
-        img_torch, cam, T_wr, ts_ns = self.loader2.load_one(idx)
-        print("USING OLD LOADER")
-
+        print(f"loaded index {self.index} out of {self.loader.length}")
+        img_torch = (out["img0"] * 255).byte()
+        cam = out["cam0"]
+        T_wr = out["T_world_rig0"]
+        ts_ns = out["time_ns0"]
         timestamp = ts_ns / 1e9
-
-        # out = self.loader.load_one(idx, pinhole=True, unrotate=True)
-        # img_torch = (out["img"] * 255).byte()
-        # cam = out["cam"]
-        # T_wr = out["T_world_rig"]
-        # print("USING SST LOADER")
-
-        # print(T_wr.t)
-        # print(T_wc.t)
-        # exit(1)
 
         HH = img_torch.shape[2]
         WW = img_torch.shape[3]
@@ -399,66 +381,26 @@ class FakeCubifyAnythingDataset():
         K = K[None]
 
         T_wc = T_wr @ cam.T_camera_rig.inverse()
-        print("T_world_rig", T_wr.t)
-        print("T_cam_rig", cam.T_camera_rig.t)
-        print("f", K)
-        print(f"height width {HH} {WW}")
 
-        # wide.image = ImageMeasurementInfo(
-        #    size=parse_size(sample["_wide/image/size"]),
-        #    K=parse_transform_3x3(sample["wide/image/k"])[None],
-        # )
         wide.image = ImageMeasurementInfo(size=img_size, K=K)
-
-        # if self.load_arkit_depth:
-        #    wide.depth = DepthMeasurementInfo(
-        #        size=parse_size(sample["_wide/depth/size"]),
-        #        K=parse_transform_3x3(sample["wide/depth/k"])[None])
-        #gt = PosedSensorInfo()
-        #gt.RT = parse_transform_4x4(sample["gt/rt"])[None]
-
-        # torch.set_printoptions(precision=4, sci_mode=False)
-        ## TODO(dd): set this! need to load trajectory.
-        # wide.T_gravity = parse_transform_3x3(sample["wide/t_gravity"])[None]
-        # print(wide.T_gravity)
-        # T_gravity2 = get_camera_to_gravity_transform(gt.RT, ImageOrientation.UPRIGHT, target=ImageOrientation.UPRIGHT)
-        # print(T_gravity2)
         T_gravity3 = get_camera_to_gravity_transform(
             T_wc.matrix, ImageOrientation.UPRIGHT, target=ImageOrientation.UPRIGHT
         )
-        # print(T_gravity3)
         wide.T_gravity = T_gravity3[None]
-
         sensor_info = SensorArrayInfo()
         sensor_info.wide = wide
-        # sensor_info.gt = gt
-
-        # img_torch = img_torch[None]
 
         result = dict(
             sensor_info=sensor_info,
             wide=dict(
                 image=img_torch,
             ),
-            # instances=read_instances(sample["wide/instances"])),
-            # gt=dict(
-            #    # NOTE: 0.0 values here correspond to failed registration areas.
-            #    depth=read_image_bytes(sample["gt/depth"], expected_size=gt.depth.size)[None].float() / MM_TO_M),
             meta=dict(video_id=video_id, timestamp=timestamp),
         )
-        # result = dict(
-        #    sensor_info=sensor_info,
-        #    wide=dict(
-        #        image=read_image_bytes(sample["wide/image"], expected_size=wide.image.size)[None],
-        #        instances=read_instances(sample["wide/instances"])),
-        #    #gt=dict(
-        #    #    # NOTE: 0.0 values here correspond to failed registration areas.
-        #    #    depth=read_image_bytes(sample["gt/depth"], expected_size=gt.depth.size)[None].float() / MM_TO_M),
-        #    meta=dict(video_id=video_id, timestamp=timestamp))
 
-        # if self.load_arkit_depth:
-        #    result["wide"]["depth"] = read_image_bytes(sample["wide/depth"], expected_size=wide.depth.size)[None].float() / MM_TO_M
         result["T_wc"] = T_wc
+        result["cam"] = cam
+        result["rotated"] = out["rotated0"]
 
         self.index += 1
 

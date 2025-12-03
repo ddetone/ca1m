@@ -30,9 +30,14 @@ from cubifyanything.preprocessor import Augmentor, Preprocessor
 from PIL import Image
 from scipy.spatial.transform import Rotation
 
+import cv2
 from surreal.fov3d.utils.file_io import ObbCsvWriter2
 from surreal.fov3d.utils.obb import ObbTW
 from surreal.fov3d.utils.pose import PoseTW, rotation_from_euler
+from surreal.fov3d.utils.render import draw_bb3s
+from surreal.fov3d.utils.image import put_text
+from surreal.fov3d.utils.video import make_mp4, safe_delete_folder
+from surreal.fov3d.settings import EVAL_PATH
 
 
 def move_device_like(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
@@ -211,7 +216,7 @@ def log_instances(
 
 # HERE !!!!
 def load_data_and_execute_model(
-    model, dataset, augmentor, preprocessor, score_thresh=0.0, viz_on_gt_points=False
+    model, dataset, augmentor, preprocessor, score_thresh=0.0, viz_on_gt_points=False, max_n=999999, skip_n=2,
 ):
     is_depth_model = "wide/depth" in augmentor.measurement_keys
     blueprint = rrb.Blueprint(
@@ -255,15 +260,20 @@ def load_data_and_execute_model(
     video_id = None
 
     root_dir = dataset.root_dir
-    out_path = os.path.join(root_dir, "cutr_frame_obbs.csv")
+    out_path = os.path.join(root_dir, "cutr_obbs.csv")
     writer = ObbCsvWriter2(out_path)
+
+    seq_name = dataset.seq_name
+    log_dir = os.path.join(EVAL_PATH, "cutr", seq_name)
+    safe_delete_folder(log_dir, extensions=[".png"], keep_folder=True, recursive=True)
+    os.makedirs(log_dir, exist_ok=True)
 
     device = model.pixel_mean
     count = 0
     for ii, sample in enumerate(dataset):
-        if count > 120:
+        if count > max_n:
             break
-        if ii % 15 != 0:
+        if ii % skip_n != 0:
             continue
 
         # sample_video_id = sample["meta"]["video_id"]
@@ -345,8 +355,6 @@ def load_data_and_execute_model(
         R_nw = R_nw_w @ R_w
         T_wo = PoseTW.from_Rt(R_nw, T_wo.t)
 
-
-
         #T_nw_w = rotation_from_euler(torch.tensor([0, 0, np.pi / 2], device=device))
         #T_nw_w = rotation_from_euler(torch.tensor([np.pi / 2, 0, 0], device=device))
         ## Rotate world by -90 degrees around x-axis.
@@ -371,7 +379,33 @@ def load_data_and_execute_model(
         )
         sem_id_to_name = {32: "Anything"}
         writer.write(all_obbs, int(timestamp * 1e9), sem_id_to_name)
+
+
+        image = np.ascontiguousarray(image[:, :, ::-1])  # BGR to RGB
+        cam = sample["cam"]
+        rotated = sample["rotated"]
+        T_cr = cam.T_camera_rig
+        T_wr = T_wc @ T_cr
+        viz_3d = image
+        viz_3d = draw_bb3s(
+            viz=viz_3d,
+            T_world_rig=T_wr,
+            cam=cam,
+            obbs=all_obbs,
+            already_rotated=rotated,
+            rotate_label=rotated,
+        )
+        put_text(viz_3d, f"CUTR, index {ii}", scale=0.8)
+        put_text(viz_3d, f"got {len(all_obbs)} obbs", scale=0.5, line=-1)
+        final = viz_3d
+        out_path = os.path.join(log_dir, f"image_{count:05d}.png")
+        cv2.imwrite(out_path, final)
+        print(f"==> saved to {out_path}")
+        out_path = os.path.join(log_dir, "current.png")
+        cv2.imwrite(out_path, final)
+
         count += 1
+    make_mp4(log_dir, 10, output_dir=log_dir, output_name="final.mp4")
 
 
 if __name__ == "__main__":
@@ -416,6 +450,8 @@ if __name__ == "__main__":
         type=str,
         default="nym_loc10_newbasemap_463617026552443",
     )
+    parser.add_argument("--max_n", type=int, default=999999)
+    parser.add_argument("--skip_n", type=int, default=2)
 
     args = parser.parse_args()
     print("Command Line Args:", args)
@@ -517,4 +553,6 @@ if __name__ == "__main__":
         preprocessor,
         score_thresh=args.score_thresh,
         viz_on_gt_points=args.viz_on_gt_points,
+        max_n=args.max_n,
+        skip_n=args.skip_n,
     )
