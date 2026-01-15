@@ -1,40 +1,39 @@
-import torch
-
-from functools import partial
-from torch import nn
-
-from cubifyanything.vit import ViT
-
 import copy
 import itertools
 import math
+import warnings
+from functools import partial
+
 import numpy as np
 import torch
 import torch.nn.functional as F
-import warnings
-
-from torch import nn
-
-from cubifyanything.boxes import GeneralInstance3DBoxes, DepthInstance3DBoxes
+from cubifyanything.boxes import DepthInstance3DBoxes, GeneralInstance3DBoxes
 from cubifyanything.instances import Instances3D
 from cubifyanything.measurement import WhitenedDepthMeasurementInfo
 from cubifyanything.pos import CameraRayEmbedding
 from cubifyanything.transforms import euler_angles_to_matrix
+from cubifyanything.vit import ViT
+from torch import nn
+
 
 def box_cxcywh_to_xyxy(x):
     x_c, y_c, w, h = x.unbind(-1)
     b = [(x_c - 0.5 * w), (y_c - 0.5 * h), (x_c + 0.5 * w), (y_c + 0.5 * h)]
     return torch.stack(b, dim=-1)
 
+
 def box_xyxy_to_cxcywh(x):
     x0, y0, x1, y1 = x.unbind(-1)
     b = [(x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0), (y1 - y0)]
     return torch.stack(b, dim=-1)
 
+
 class LayerNorm2D(nn.Module):
     def __init__(self, normalized_shape, norm_layer=nn.LayerNorm):
         super().__init__()
-        self.ln = norm_layer(normalized_shape) if norm_layer is not None else nn.Identity()
+        self.ln = (
+            norm_layer(normalized_shape) if norm_layer is not None else nn.Identity()
+        )
 
     def forward(self, x):
         """
@@ -45,8 +44,9 @@ class LayerNorm2D(nn.Module):
         x = x.permute(0, 3, 1, 2)
         return x
 
+
 class MLP(nn.Module):
-    """ Very simple multi-layer perceptron (also called FFN)"""
+    """Very simple multi-layer perceptron (also called FFN)"""
 
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
         super().__init__()
@@ -61,6 +61,7 @@ class MLP(nn.Module):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
 
         return x
+
 
 class NestedTensor(object):
     def __init__(self, tensors, mask):
@@ -87,7 +88,8 @@ class NestedTensor(object):
         return self.tensors, self.mask
 
     def __repr__(self):
-        return str(self.tensors)    
+        return str(self.tensors)
+
 
 # Plain-DETR.
 class GlobalCrossAttention(nn.Module):
@@ -100,14 +102,14 @@ class GlobalCrossAttention(nn.Module):
         attn_drop=0.0,
         proj_drop=0.0,
         rpe_hidden_dim=512,
-        rpe_type='linear',
+        rpe_type="linear",
         feature_stride=16,
     ):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
+        self.scale = qk_scale or head_dim**-0.5
         self.rpe_type = rpe_type
         self.feature_stride = feature_stride
 
@@ -124,9 +126,11 @@ class GlobalCrossAttention(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def build_cpb_mlp(self, in_dim, hidden_dim, out_dim):
-        cpb_mlp = nn.Sequential(nn.Linear(in_dim, hidden_dim, bias=True),
-                                nn.ReLU(inplace=True),
-                                nn.Linear(hidden_dim, out_dim, bias=False))
+        cpb_mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, out_dim, bias=False),
+        )
         return cpb_mlp
 
     def forward(
@@ -137,40 +141,75 @@ class GlobalCrossAttention(nn.Module):
         v_input_flatten,
         input_spatial_shapes,
         input_padding_mask=None,
-        box_attn_prior_mask=None
+        box_attn_prior_mask=None,
     ):
-        assert input_spatial_shapes.size(0) == 1, 'This is designed for single-scale decoder.'
+        assert (
+            input_spatial_shapes.size(0) == 1
+        ), "This is designed for single-scale decoder."
         h, w = input_spatial_shapes[0]
         stride = self.feature_stride
 
-        ref_2d_xyxy = torch.cat([
-            reference_2d[:, :, :, :2] - reference_2d[:, :, :, 2:] / 2,
-            reference_2d[:, :, :, :2] + reference_2d[:, :, :, 2:] / 2,
-        ], dim=-1)  # B, nQ, 1, 4
+        ref_2d_xyxy = torch.cat(
+            [
+                reference_2d[:, :, :, :2] - reference_2d[:, :, :, 2:] / 2,
+                reference_2d[:, :, :, :2] + reference_2d[:, :, :, 2:] / 2,
+            ],
+            dim=-1,
+        )  # B, nQ, 1, 4
 
-        pos_x = torch.linspace(0.5, w - 0.5, w, dtype=torch.float32, device=w.device)[None, None, :, None] * stride  # 1, 1, w, 1
-        pos_y = torch.linspace(0.5, h - 0.5, h, dtype=torch.float32, device=h.device)[None, None, :, None] * stride  # 1, 1, h, 1
+        pos_x = (
+            torch.linspace(0.5, w - 0.5, w, dtype=torch.float32, device=w.device)[
+                None, None, :, None
+            ]
+            * stride
+        )  # 1, 1, w, 1
+        pos_y = (
+            torch.linspace(0.5, h - 0.5, h, dtype=torch.float32, device=h.device)[
+                None, None, :, None
+            ]
+            * stride
+        )  # 1, 1, h, 1
 
-        if self.rpe_type == 'abs_log8':
+        if self.rpe_type == "abs_log8":
             delta_x = ref_2d_xyxy[..., 0::2] - pos_x  # B, nQ, w, 2
             delta_y = ref_2d_xyxy[..., 1::2] - pos_y  # B, nQ, h, 2
-            delta_x = torch.sign(delta_x) * torch.log2(torch.abs(delta_x) + 1.0) / np.log2(8)
-            delta_y = torch.sign(delta_y) * torch.log2(torch.abs(delta_y) + 1.0) / np.log2(8)
-        elif self.rpe_type == 'linear':
+            delta_x = (
+                torch.sign(delta_x) * torch.log2(torch.abs(delta_x) + 1.0) / np.log2(8)
+            )
+            delta_y = (
+                torch.sign(delta_y) * torch.log2(torch.abs(delta_y) + 1.0) / np.log2(8)
+            )
+        elif self.rpe_type == "linear":
             delta_x = ref_2d_xyxy[..., 0::2] - pos_x  # B, nQ, w, 2
             delta_y = ref_2d_xyxy[..., 1::2] - pos_y  # B, nQ, h, 2
         else:
             raise NotImplementedError
 
-        rpe_x, rpe_y = self.cpb_mlp1(delta_x), self.cpb_mlp2(delta_y)  # B, nQ, w/h, nheads
-        rpe = (rpe_x[:, :, None] + rpe_y[:, :, :, None]).flatten(2, 3) # B, nQ, h, w, nheads ->  B, nQ, h*w, nheads
+        rpe_x, rpe_y = self.cpb_mlp1(delta_x), self.cpb_mlp2(
+            delta_y
+        )  # B, nQ, w/h, nheads
+        rpe = (rpe_x[:, :, None] + rpe_y[:, :, :, None]).flatten(
+            2, 3
+        )  # B, nQ, h, w, nheads ->  B, nQ, h*w, nheads
         rpe = rpe.permute(0, 3, 1, 2)
 
         B_, N, C = k_input_flatten.shape
-        k = self.k(k_input_flatten).reshape(B_, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-        v = self.v(v_input_flatten).reshape(B_, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        k = (
+            self.k(k_input_flatten)
+            .reshape(B_, N, self.num_heads, C // self.num_heads)
+            .permute(0, 2, 1, 3)
+        )
+        v = (
+            self.v(v_input_flatten)
+            .reshape(B_, N, self.num_heads, C // self.num_heads)
+            .permute(0, 2, 1, 3)
+        )
         B_, N, C = query.shape
-        q = self.q(query).reshape(B_, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        q = (
+            self.q(query)
+            .reshape(B_, N, self.num_heads, C // self.num_heads)
+            .permute(0, 2, 1, 3)
+        )
 
         q = q * self.scale
 
@@ -199,16 +238,11 @@ class GlobalCrossAttention(nn.Module):
 
         return x
 
+
 # Plain-DETR.
 class PreNormGlobalDecoderLayer(nn.Module):
     def __init__(
-        self,
-        xattn,
-        d_model=256,
-        d_ffn=1024,
-        dropout=0.1,
-        activation=nn.ReLU,
-        n_heads=8
+        self, xattn, d_model=256, d_ffn=1024, dropout=0.1, activation=nn.ReLU, n_heads=8
     ):
         super().__init__()
 
@@ -245,7 +279,7 @@ class PreNormGlobalDecoderLayer(nn.Module):
         src_spatial_shapes,
         src_padding_mask=None,
         self_attn_mask=None,
-        box_attn_prior_mask=None
+        box_attn_prior_mask=None,
     ):
         # self attention
         tgt2 = self.norm2(tgt)
@@ -270,7 +304,7 @@ class PreNormGlobalDecoderLayer(nn.Module):
                 src,
                 src_spatial_shapes,
                 src_padding_mask,
-                box_attn_prior_mask=box_attn_prior_mask
+                box_attn_prior_mask=box_attn_prior_mask,
             )
 
             tgt = tgt + self.dropout1(tgt2)
@@ -282,29 +316,50 @@ class PreNormGlobalDecoderLayer(nn.Module):
 
         return tgt
 
+
 # This should be super vague, and take in "prompts" as queries and simply run them through
 # the underlying transformer.
 class PromptDecoder(nn.Module):
-    def __init__(
-            self, embed_dim, layer, num_layers, predictors, norm=nn.Identity()):
+    def __init__(self, embed_dim, layer, num_layers, predictors, norm=nn.Identity()):
         super(PromptDecoder, self).__init__()
 
         self.embed_dim = embed_dim
         self.layers = nn.ModuleList([copy.deepcopy(layer) for _ in range(num_layers)])
         self.num_layers = num_layers
 
-        self.predictors = nn.ModuleList([nn.ModuleList([copy.deepcopy(p) for p in predictors]) for _ in range(num_layers)])
+        self.predictors = nn.ModuleList(
+            [
+                nn.ModuleList([copy.deepcopy(p) for p in predictors])
+                for _ in range(num_layers)
+            ]
+        )
         self.norm = norm
 
     def forward(
-        self, src, src_pos_embed, src_padding_mask, src_spatial_shapes, level_start_index, valid_ratios,
-        prompts, sensor):
+        self,
+        src,
+        src_pos_embed,
+        src_padding_mask,
+        src_spatial_shapes,
+        level_start_index,
+        valid_ratios,
+        prompts,
+        sensor,
+    ):
         # Not the best assumption for now, but assume we can treat the "prompt" in a uniform manner as "reference.
         # Interleave so we have List[List[Instances]] of size # of instances x # of prompts
-        reference = [Instances3D.cat([prompt.pred[idx] for prompt in prompts if prompt.box_attn_prior_mask.any()])
-                     for idx in range(prompts[0].batch_size)]
+        reference = [
+            Instances3D.cat(
+                [
+                    prompt.pred[idx]
+                    for prompt in prompts
+                    if prompt.box_attn_prior_mask.any()
+                ]
+            )
+            for idx in range(prompts[0].batch_size)
+        ]
 
-        prompts = Prompt.cat(prompts)        
+        prompts = Prompt.cat(prompts)
         output = prompts.query
         intermediate = []
         intermediate_preds = []
@@ -322,12 +377,15 @@ class PromptDecoder(nn.Module):
                 src_spatial_shapes,
                 src_padding_mask,
                 prompts.self_attn_mask,
-                box_attn_prior_mask=prompts.box_attn_prior_mask
+                box_attn_prior_mask=prompts.box_attn_prior_mask,
             )
 
             output_after_norm = self.norm(output)
 
-            pred_instances = [Instances3D(image_size) for image_size in sensor["image"].data.image_sizes]
+            pred_instances = [
+                Instances3D(image_size)
+                for image_size in sensor["image"].data.image_sizes
+            ]
             for pred_instances_, reference_ in zip(pred_instances, reference):
                 # The previous layer's "predictions", are this rounds, "proposals"
                 pred_instances_.proposal_boxes = reference_.pred_boxes
@@ -351,14 +409,24 @@ class PromptDecoder(nn.Module):
         # Always return the full sequence of intermediates.
         return torch.stack(intermediate), intermediate_preds
 
+
 class PromptEncoder(nn.Module):
     def __init__(self, embed_dim):
         super(PromptEncoder, self).__init__()
 
         self.embed_dim = embed_dim
 
+
 class Box2DPromptEncoderLearned(PromptEncoder):
-    def __init__(self, embed_dim, max_x=1280, max_y=1280, max_w=1280, max_h=1280, discretization_steps=1):
+    def __init__(
+        self,
+        embed_dim,
+        max_x=1280,
+        max_y=1280,
+        max_w=1280,
+        max_h=1280,
+        discretization_steps=1,
+    ):
         super(Box2DPromptEncoderLearned, self).__init__(embed_dim)
 
         self.x = nn.Embedding(max_x * discretization_steps, embed_dim // 4)
@@ -368,25 +436,38 @@ class Box2DPromptEncoderLearned(PromptEncoder):
         self.discretization_steps = discretization_steps
 
         self.register_buffer("min_bounds", torch.tensor([0.0, 0.0, 0.0, 0.0]).float())
-        self.register_buffer("max_bounds", torch.tensor([max_x - 1, max_y - 1, max_w - 1, max_h - 1]).float())
+        self.register_buffer(
+            "max_bounds",
+            torch.tensor([max_x - 1, max_y - 1, max_w - 1, max_h - 1]).float(),
+        )
 
     # Usually, this should be detached.
     def forward(self, boxes):
-        indexes = self.discretization_steps * torch.clamp(boxes, min=self.min_bounds[None, None], max=self.max_bounds[None, None]).int()
-        pos = torch.cat((
-            self.x(indexes[..., 0]),
-            self.y(indexes[..., 1]),
-            self.w(indexes[..., 2]),
-            self.h(indexes[..., 3]),
-        ), dim=-1)
+        indexes = (
+            self.discretization_steps
+            * torch.clamp(
+                boxes, min=self.min_bounds[None, None], max=self.max_bounds[None, None]
+            ).int()
+        )
+        pos = torch.cat(
+            (
+                self.x(indexes[..., 0]),
+                self.y(indexes[..., 1]),
+                self.w(indexes[..., 2]),
+                self.h(indexes[..., 3]),
+            ),
+            dim=-1,
+        )
 
         return pos
+
 
 class Predictor(nn.Module):
     def __init__(self, embed_dim):
         super(Predictor, self).__init__()
 
         self.embed_dim = embed_dim
+
 
 class ScalePredictor(Predictor):
     def __init__(self, embed_dim):
@@ -403,12 +484,15 @@ class ScalePredictor(Predictor):
         shift_scale = torch.cat((pred_shift, pred_scale), dim=-1)
         # Probably better to store on "depth", but we don't have that sensor for
         # monocular.
-        scale_infos = sensor["depth"].info if "depth" in sensor else sensor["image"].info
+        scale_infos = (
+            sensor["depth"].info if "depth" in sensor else sensor["image"].info
+        )
         for i, info_ in enumerate(scale_infos):
             info_.pred_parameters = shift_scale[i]
 
         # Slice off.
-        return x[:, 2:]        
+        return x[:, 2:]
+
 
 class ClassPredictor(Predictor):
     def __init__(self, embed_dim, num_classes, prior_prob=0.01, num_layers=None):
@@ -417,12 +501,12 @@ class ClassPredictor(Predictor):
         self.num_classes = num_classes
 
         bias_value = -math.log((1 - prior_prob) / prior_prob)
-        
+
         if num_layers is None:
             self.linear = nn.Linear(embed_dim, num_classes)
-            self.linear.bias.data.fill_(bias_value)            
+            self.linear.bias.data.fill_(bias_value)
         else:
-            self.linear = MLP(embed_dim, embed_dim, num_classes, num_layers)            
+            self.linear = MLP(embed_dim, embed_dim, num_classes, num_layers)
             self.linear.layers[-1].bias.data.fill_(bias_value)
 
     def forward(self, x, proposals, sensor):
@@ -431,7 +515,8 @@ class ClassPredictor(Predictor):
         for proposals_, logits_ in zip(proposals, logits):
             proposals_.pred_logits = logits_
 
-        return x    
+        return x
+
 
 class Box2DPredictor(Predictor):
     def __init__(self, embed_dim, num_layers=3):
@@ -442,11 +527,18 @@ class Box2DPredictor(Predictor):
         nn.init.constant_(self.mlp.layers[-1].weight.data, 0)
         nn.init.constant_(self.mlp.layers[-1].bias.data, 0)
 
+
 class DeltaBox2DTransform(nn.Module):
-    def __init__(self, wh_ratio_clip=0.016, clamp_to_border=True, center_clamp=None,
-                 means=(0., 0., 0., 0.), stds=(1., 1., 1., 1.)):
+    def __init__(
+        self,
+        wh_ratio_clip=0.016,
+        clamp_to_border=True,
+        center_clamp=None,
+        means=(0.0, 0.0, 0.0, 0.0),
+        stds=(1.0, 1.0, 1.0, 1.0),
+    ):
         super(DeltaBox2DTransform, self).__init__()
-        
+
         self._wh_ratio_clip = wh_ratio_clip
         self._clamp_to_border = clamp_to_border
         self._center_clamp = center_clamp
@@ -474,7 +566,7 @@ class DeltaBox2DTransform(nn.Module):
         deltas = deltas.sub_(self.means[None]).div_(self.stds[None])
 
         return deltas
-    
+
     def apply_deltas(self, deltas, boxes, clamp_shape=None):
         dxy = deltas[..., :2]
         dwh = deltas[..., 2:]
@@ -489,7 +581,9 @@ class DeltaBox2DTransform(nn.Module):
         # Don't allow the delta in WH to go larger than this.
         max_ratio = np.abs(np.log(self._wh_ratio_clip))
         if self._center_clamp is not None:
-            dxy_wh = torch.clamp(dxy_wh, max=self._center_clamp, min=-self._center_clamp)
+            dxy_wh = torch.clamp(
+                dxy_wh, max=self._center_clamp, min=-self._center_clamp
+            )
             dwh = torch.clamp(dwh, max=max_ratio)
         else:
             dwh = dwh.clamp(min=-max_ratio, max=max_ratio)
@@ -505,10 +599,15 @@ class DeltaBox2DTransform(nn.Module):
             # This code actually clamps.
             bboxes.clamp_(
                 min=torch.zeros((1, 4), device=boxes.device),
-                max=torch.tensor([[clamp_shape[1], clamp_shape[0], clamp_shape[1], clamp_shape[0]]], device=boxes.device))
+                max=torch.tensor(
+                    [[clamp_shape[1], clamp_shape[0], clamp_shape[1], clamp_shape[0]]],
+                    device=boxes.device,
+                ),
+            )
 
         # NOTE: this is in XYXY now.
         return bboxes
+
 
 # Expects proposal_boxes. Outputs pred_boxes.
 class DeltaBox2DPredictor(Box2DPredictor):
@@ -521,15 +620,17 @@ class DeltaBox2DPredictor(Box2DPredictor):
         deltas = self.mlp(x)
         for deltas_, proposals_ in zip(deltas, proposals):
             proposals_.pred_boxes_delta = deltas_
-            proposals_.pred_boxes = box_xyxy_to_cxcywh(self.transform.apply_deltas(
-                deltas_,
-                proposals_.proposal_boxes,
-                # Might make sense to remove ViT padding and use .image_sizes here.
-                clamp_shape=sensor["image"].data.tensor.shape[-2:]
-            ))
-            
+            proposals_.pred_boxes = box_xyxy_to_cxcywh(
+                self.transform.apply_deltas(
+                    deltas_,
+                    proposals_.proposal_boxes,
+                    # Might make sense to remove ViT padding and use .image_sizes here.
+                    clamp_shape=sensor["image"].data.tensor.shape[-2:],
+                )
+            )
 
         return x
+
 
 class AbsoluteBox3DPredictor(Predictor):
     def __init__(
@@ -540,7 +641,8 @@ class AbsoluteBox3DPredictor(Predictor):
         scale_shift=True,
         num_layers=3,
         pred_proj_rel_pred_box=True,
-        clamp_xy_to_border=True):
+        clamp_xy_to_border=True,
+    ):
         super(AbsoluteBox3DPredictor, self).__init__(embed_dim=embed_dim)
 
         self.pose_type = pose_type
@@ -559,11 +661,12 @@ class AbsoluteBox3DPredictor(Predictor):
             embed_dim,
             embed_dim,
             self.center_2d_dim + self.z_dim + self.dims_dim + self.pose_dim,
-            3)
+            3,
+        )
 
         # dxdy init as zero.
-        nn.init.constant_(self.mlp.layers[-1].weight.data[:self.center_2d_dim], 0)
-        nn.init.constant_(self.mlp.layers[-1].bias.data[:self.center_2d_dim], 0)
+        nn.init.constant_(self.mlp.layers[-1].weight.data[: self.center_2d_dim], 0)
+        nn.init.constant_(self.mlp.layers[-1].bias.data[: self.center_2d_dim], 0)
 
     def _scale_z(self, z, info):
         if isinstance(info, WhitenedDepthMeasurementInfo):
@@ -592,37 +695,83 @@ class AbsoluteBox3DPredictor(Predictor):
     def forward(self, x, proposals, sensor):
         batch_size = len(x)
         box_2d_deltas, box_z_unscaled, box_dims, box_pose = torch.split(
-            self.mlp(x), (self.center_2d_dim, self.z_dim, self.dims_dim, self.pose_dim), dim=-1)
+            self.mlp(x),
+            (self.center_2d_dim, self.z_dim, self.dims_dim, self.pose_dim),
+            dim=-1,
+        )
 
         if self.pose_type == "z":
             # Hard-code the XZ components to 0.
-            box_pose = torch.cat((box_pose, torch.zeros_like(box_pose), torch.zeros_like(box_pose)), dim=-1)
-            box_pose = euler_angles_to_matrix(box_pose.view(-1, 3), 'YXZ').view(batch_size, -1, 3, 3)
+            box_pose = torch.cat(
+                (box_pose, torch.zeros_like(box_pose), torch.zeros_like(box_pose)),
+                dim=-1,
+            )
+            box_pose = euler_angles_to_matrix(box_pose.view(-1, 3), "YXZ").view(
+                batch_size, -1, 3, 3
+            )
 
-        scale_infos = sensor["depth"].info if "depth" in sensor else sensor["image"].info
+        scale_infos = (
+            sensor["depth"].info if "depth" in sensor else sensor["image"].info
+        )
 
         if self.scale_shift:
-            box_z_scaled = torch.stack([self._scale_z(box_z_unscaled_, info_) for box_z_unscaled_, info_ in zip(box_z_unscaled, scale_infos)], dim=0)
+            box_z_scaled = torch.stack(
+                [
+                    self._scale_z(box_z_unscaled_, info_)
+                    for box_z_unscaled_, info_ in zip(box_z_unscaled, scale_infos)
+                ],
+                dim=0,
+            )
         else:
             # Assume the verbatim output is also scaled.
             box_z_scaled = box_z_unscaled
 
         box_dims = torch.exp(box_dims.clip(max=5))
         if self.scale_shift:
-            box_dims = torch.stack([self._scale_dims(box_dims_unscaled_, info_) for box_dims_unscaled_, info_ in zip(box_dims, scale_infos)], dim=0)
+            box_dims = torch.stack(
+                [
+                    self._scale_dims(box_dims_unscaled_, info_)
+                    for box_dims_unscaled_, info_ in zip(box_dims, scale_infos)
+                ],
+                dim=0,
+            )
 
         clamp_shape = sensor["image"].data.tensor.shape[-2:]
-        for box_2d_deltas_, box_z_unscaled_, box_z_scaled_, box_dims_, box_pose_, proposals_, info_ in zip(
-                box_2d_deltas, box_z_unscaled, box_z_scaled, box_dims, box_pose, proposals, scale_infos):
+        for (
+            box_2d_deltas_,
+            box_z_unscaled_,
+            box_z_scaled_,
+            box_dims_,
+            box_pose_,
+            proposals_,
+            info_,
+        ) in zip(
+            box_2d_deltas,
+            box_z_unscaled,
+            box_z_scaled,
+            box_dims,
+            box_pose,
+            proposals,
+            scale_infos,
+        ):
             if self.pred_proj_rel_pred_box:
-                pred_proj_xy_ = proposals_.pred_boxes[:, :2] + box_2d_deltas_ * proposals_.pred_boxes[:, 2:]
+                pred_proj_xy_ = (
+                    proposals_.pred_boxes[:, :2]
+                    + box_2d_deltas_ * proposals_.pred_boxes[:, 2:]
+                )
             else:
-                pred_proj_xy_ = proposals_.proposal_boxes[:, :2] + box_2d_deltas_ * proposals_.proposal_boxes[:, 2:]
+                pred_proj_xy_ = (
+                    proposals_.proposal_boxes[:, :2]
+                    + box_2d_deltas_ * proposals_.proposal_boxes[:, 2:]
+                )
 
             if self.clamp_xy_to_border:
                 pred_proj_xy_.clamp_(
                     min=torch.zeros((1, 2), device=x.device),
-                    max=torch.tensor([[clamp_shape[1], clamp_shape[0]]], device=x.device))
+                    max=torch.tensor(
+                        [[clamp_shape[1], clamp_shape[0]]], device=x.device
+                    ),
+                )
 
             proposals_.pred_proj_xy = pred_proj_xy_
             proposals_.pred_z_unscaled = box_z_unscaled_
@@ -642,6 +791,7 @@ class AbsoluteBox3DPredictor(Predictor):
 
         return x
 
+
 class Prompter(nn.Module):
     def __init__(self, encoders=None):
         super(Prompter, self).__init__()
@@ -649,15 +799,26 @@ class Prompter(nn.Module):
         self.encoders = encoders
         self.box_2d_transform = DeltaBox2DTransform()
 
+
 class Prompt(object):
-    def __init__(self, query, pos_embed, self_attn_mask, pred=None, box_attn_prior_mask=None, has_output=True):
+    def __init__(
+        self,
+        query,
+        pos_embed,
+        self_attn_mask,
+        pred=None,
+        box_attn_prior_mask=None,
+        has_output=True,
+    ):
         self.query = query
         self.pos_embed = pos_embed
         self.self_attn_mask = self_attn_mask
         self.box_attn_prior_mask = box_attn_prior_mask
 
         if self.box_attn_prior_mask is None:
-            self.box_attn_prior_mask = torch.ones((self.number_prompts,), dtype=torch.bool, device=self.device) # bool
+            self.box_attn_prior_mask = torch.ones(
+                (self.number_prompts,), dtype=torch.bool, device=self.device
+            )  # bool
 
         self.has_output = has_output
 
@@ -683,13 +844,17 @@ class Prompt(object):
 
         # Combine into a set of coherent prompts that can be immediately sent for decoding.
         prompt_full_self_attn = torch.ones(
-            (total_prompts, total_prompts), dtype=torch.bool, device=prompt_list[0].device)
-        
+            (total_prompts, total_prompts),
+            dtype=torch.bool,
+            device=prompt_list[0].device,
+        )
+
         prompt_start_idx = 0
         for prompt in prompt_list:
             prompt_full_self_attn[
-                prompt_start_idx:(prompt_start_idx + prompt.number_prompts),
-                prompt_start_idx:(prompt_start_idx + prompt.number_prompts)] = prompt.self_attn_mask
+                prompt_start_idx : (prompt_start_idx + prompt.number_prompts),
+                prompt_start_idx : (prompt_start_idx + prompt.number_prompts),
+            ] = prompt.self_attn_mask
 
             prompt_start_idx += prompt.number_prompts
 
@@ -698,16 +863,27 @@ class Prompt(object):
             torch.cat([prompt_.query for prompt_ in prompt_list], dim=1),
             torch.cat([prompt_.pos_embed for prompt_ in prompt_list], dim=1),
             prompt_full_self_attn,
-            box_attn_prior_mask=torch.cat([prompt_.box_attn_prior_mask for prompt_ in prompt_list]),
-            pred=None) # No way to assume we can concatenate instances?
+            box_attn_prior_mask=torch.cat(
+                [prompt_.box_attn_prior_mask for prompt_ in prompt_list]
+            ),
+            pred=None,
+        )  # No way to assume we can concatenate instances?
+
 
 class MetricQueries(Prompter):
     class MetricPrompt(Prompt):
         def __init__(self, query, pos_embed, self_attn_mask):
             super(MetricQueries.MetricPrompt, self).__init__(
                 # NOTE: These attend to the global feature maps during cross attention.
-                query, pos_embed, self_attn_mask, None, box_attn_prior_mask=torch.zeros((2,), dtype=torch.bool, device=query.device), # bool
-                has_output=False)
+                query,
+                pos_embed,
+                self_attn_mask,
+                None,
+                box_attn_prior_mask=torch.zeros(
+                    (2,), dtype=torch.bool, device=query.device
+                ),  # bool
+                has_output=False,
+            )
 
     def __init__(self, input_channels, input_stride, predictors, encoders=None):
         super(MetricQueries, self).__init__()
@@ -725,33 +901,49 @@ class MetricQueries(Prompter):
         metric_queries = self.query_embed.weight[None].repeat(batch_size, 1, 1)
 
         # Prevent attention between ordinary queries and hybrid queries.
-        self_attn_mask = torch.zeros((2, 2), dtype=torch.bool, device=metric_queries.device) # bool
+        self_attn_mask = torch.zeros(
+            (2, 2), dtype=torch.bool, device=metric_queries.device
+        )  # bool
 
         return MetricQueries.MetricPrompt(
             query=metric_queries,
             pos_embed=torch.zeros_like(metric_queries),
-            self_attn_mask=self_attn_mask)
+            self_attn_mask=self_attn_mask,
+        )
 
     def inference(self, prompt, output, sensor, top_k=100):
         # No-op since the scale should already be applied by now.
         return None
 
+
 class EncoderProposals(Prompter):
     class EncoderPrompt(Prompt):
-        def __init__(self, query, pos_embed, self_attn_mask, encoder_proposals, encoder_preds, num_one2one):
-            super(EncoderProposals.EncoderPrompt, self).__init__(query, pos_embed, self_attn_mask, encoder_preds)
+        def __init__(
+            self,
+            query,
+            pos_embed,
+            self_attn_mask,
+            encoder_proposals,
+            encoder_preds,
+            num_one2one,
+        ):
+            super(EncoderProposals.EncoderPrompt, self).__init__(
+                query, pos_embed, self_attn_mask, encoder_preds
+            )
 
             self.encoder_proposals = encoder_proposals
             self.num_one2one = num_one2one
 
-    def __init__(self,
-                 input_channels,
-                 input_stride,
-                 level_strides,
-                 predictors,
-                 min_size=50,
-                 top_k_test=None,
-                 encoders=None):
+    def __init__(
+        self,
+        input_channels,
+        input_stride,
+        level_strides,
+        predictors,
+        min_size=50,
+        top_k_test=None,
+        encoders=None,
+    ):
         super(EncoderProposals, self).__init__()
 
         self.embed_dim = input_channels
@@ -763,7 +955,9 @@ class EncoderProposals(Prompter):
 
         self.top_k_test = top_k_test
 
-        self.num_classes = next(p for p in self.predictors if isinstance(p, ClassPredictor)).num_classes
+        self.num_classes = next(
+            p for p in self.predictors if isinstance(p, ClassPredictor)
+        ).num_classes
 
         self.query_embed = nn.Embedding(1200, self.embed_dim)
 
@@ -782,22 +976,34 @@ class EncoderProposals(Prompter):
                     layers = []
                     for _ in range(scale - 1):
                         layers += [
-                            nn.Conv2d(self.embed_dim, self.embed_dim, kernel_size=2, stride=2),
+                            nn.Conv2d(
+                                self.embed_dim, self.embed_dim, kernel_size=2, stride=2
+                            ),
                             LayerNorm2D(self.embed_dim),
-                            nn.GELU()
+                            nn.GELU(),
                         ]
-                    layers.append(nn.Conv2d(self.embed_dim, self.embed_dim, kernel_size=2, stride=2))
+                    layers.append(
+                        nn.Conv2d(
+                            self.embed_dim, self.embed_dim, kernel_size=2, stride=2
+                        )
+                    )
                     self.enc_output_proj.append(nn.Sequential(*layers))
                 else:
                     scale = int(math.log2(self.input_stride / level_stride))
                     layers = []
                     for _ in range(scale - 1):
                         layers += [
-                            nn.ConvTranspose2d(self.embed_dim, self.embed_dim, kernel_size=2, stride=2),
+                            nn.ConvTranspose2d(
+                                self.embed_dim, self.embed_dim, kernel_size=2, stride=2
+                            ),
                             LayerNorm2D(d_model),
-                            nn.GELU()
+                            nn.GELU(),
                         ]
-                    layers.append(nn.ConvTranspose2d(self.embed_dim, self.embed_dim, kernel_size=2, stride=2))
+                    layers.append(
+                        nn.ConvTranspose2d(
+                            self.embed_dim, self.embed_dim, kernel_size=2, stride=2
+                        )
+                    )
                     self.enc_output_proj.append(nn.Sequential(*layers))
 
         self.enc_output = nn.Linear(self.embed_dim, self.embed_dim)
@@ -812,16 +1018,30 @@ class EncoderProposals(Prompter):
     def forward(self, src_flatten, mask_flatten, spatial_shapes, sensor):
         # We consider the parameter-free _proposals_ from the encoder and then the subsequently
         # refined _instances_.
-        encoder_proposals, pred_instances = self.get_proposals(src_flatten, mask_flatten, spatial_shapes, sensor)
+        encoder_proposals, pred_instances = self.get_proposals(
+            src_flatten, mask_flatten, spatial_shapes, sensor
+        )
 
         # Assume uniform number of boxes.
-        box_2d_pos_embed = self.encoders.box_2d_encoder(torch.stack([
-            pred_instances_.pred_boxes.detach() for pred_instances_ in pred_instances
-        ], dim=0))
+        box_2d_pos_embed = self.encoders.box_2d_encoder(
+            torch.stack(
+                [
+                    pred_instances_.pred_boxes.detach()
+                    for pred_instances_ in pred_instances
+                ],
+                dim=0,
+            )
+        )
 
         batch_size, number_queries, _ = box_2d_pos_embed.shape
-        box_2d_queries = self.query_embed.weight[None, :number_queries].repeat(batch_size, 1, 1)
-        self_attn_mask = torch.zeros((number_queries, number_queries), dtype=torch.bool, device=box_2d_queries.device) # bool
+        box_2d_queries = self.query_embed.weight[None, :number_queries].repeat(
+            batch_size, 1, 1
+        )
+        self_attn_mask = torch.zeros(
+            (number_queries, number_queries),
+            dtype=torch.bool,
+            device=box_2d_queries.device,
+        )  # bool
 
         # Guard during training against too few proposals.
         return EncoderProposals.EncoderPrompt(
@@ -830,15 +1050,22 @@ class EncoderProposals(Prompter):
             self_attn_mask=self_attn_mask,
             encoder_proposals=encoder_proposals,
             encoder_preds=pred_instances,
-            num_one2one=self.top_k_test)
+            num_one2one=self.top_k_test,
+        )
 
     def expand_encoder_output(self, memory, memory_padding_mask, spatial_shapes):
-        assert spatial_shapes.size(0) == 1, f'Get encoder output of shape {spatial_shapes}, not sure how to expand'
+        assert (
+            spatial_shapes.size(0) == 1
+        ), f"Get encoder output of shape {spatial_shapes}, not sure how to expand"
 
         bs, _, c = memory.shape
 
-        _out_memory = memory.view(bs, spatial_shapes[0, 0], spatial_shapes[0, 1], c).permute(0, 3, 1, 2)
-        _out_memory_padding_mask = memory_padding_mask.view(bs, spatial_shapes[0, 0], spatial_shapes[0, 1])
+        _out_memory = memory.view(
+            bs, spatial_shapes[0, 0], spatial_shapes[0, 1], c
+        ).permute(0, 3, 1, 2)
+        _out_memory_padding_mask = memory_padding_mask.view(
+            bs, spatial_shapes[0, 0], spatial_shapes[0, 1]
+        )
 
         out_memory, out_memory_padding_mask, out_spatial_shapes = [], [], []
         start_level = 0
@@ -855,13 +1082,21 @@ class EncoderProposals(Prompter):
             out_memory_padding_mask.append(mask.squeeze(0))
             out_spatial_shapes.append(mem.shape[-2:])
 
-        out_memory = torch.cat([mem.flatten(2).transpose(1, 2) for mem in out_memory], dim=1)
-        out_memory_padding_mask = torch.cat([mask.flatten(1) for mask in out_memory_padding_mask], dim=1)
-        out_spatial_shapes = torch.as_tensor(out_spatial_shapes, dtype=torch.long, device=out_memory.device)
+        out_memory = torch.cat(
+            [mem.flatten(2).transpose(1, 2) for mem in out_memory], dim=1
+        )
+        out_memory_padding_mask = torch.cat(
+            [mask.flatten(1) for mask in out_memory_padding_mask], dim=1
+        )
+        out_spatial_shapes = torch.as_tensor(
+            out_spatial_shapes, dtype=torch.long, device=out_memory.device
+        )
 
         return out_memory, out_memory_padding_mask, out_spatial_shapes
 
-    def gen_encoder_output_proposals(self, memory, memory_padding_mask, spatial_shapes, sensor):
+    def gen_encoder_output_proposals(
+        self, memory, memory_padding_mask, spatial_shapes, sensor
+    ):
         if self.number_levels > 1:
             memory, memory_padding_mask, spatial_shapes = self.expand_encoder_output(
                 memory, memory_padding_mask, spatial_shapes
@@ -876,12 +1111,20 @@ class EncoderProposals(Prompter):
             stride = self.level_strides[lvl]
 
             grid_y, grid_x = torch.meshgrid(
-                torch.linspace(0, H_ - 1, H_, dtype=torch.float32, device=memory.device),
-                torch.linspace(0, W_ - 1, W_, dtype=torch.float32, device=memory.device),
+                torch.linspace(
+                    0, H_ - 1, H_, dtype=torch.float32, device=memory.device
+                ),
+                torch.linspace(
+                    0, W_ - 1, W_, dtype=torch.float32, device=memory.device
+                ),
             )
             grid = torch.cat([grid_x.unsqueeze(-1), grid_y.unsqueeze(-1)], -1)
             grid = (grid.unsqueeze(0).expand(N_, -1, -1, -1) + 0.5) * stride
-            wh = torch.ones_like(grid) * self.min_proposal_size * (2.0 ** (lvl - start_level))
+            wh = (
+                torch.ones_like(grid)
+                * self.min_proposal_size
+                * (2.0 ** (lvl - start_level))
+            )
             proposal = torch.cat((grid, wh), -1).view(N_, -1, 4)
             proposals.append(proposal)
             _cur += H_ * W_
@@ -889,11 +1132,11 @@ class EncoderProposals(Prompter):
 
         H_, W_ = spatial_shapes[0]
         stride = self.level_strides[0]
-        mask_flatten_ = memory_padding_mask[:, :H_*W_].view(N_, H_, W_, 1)
+        mask_flatten_ = memory_padding_mask[:, : H_ * W_].view(N_, H_, W_, 1)
         valid_H = torch.sum(~mask_flatten_[:, :, 0, 0], 1, keepdim=True) * stride
         valid_W = torch.sum(~mask_flatten_[:, 0, :, 0], 1, keepdim=True) * stride
         img_size = torch.cat([valid_W, valid_H, valid_W, valid_H], dim=-1)
-        img_size = img_size.unsqueeze(1) # [BS, 1, 4]
+        img_size = img_size.unsqueeze(1)  # [BS, 1, 4]
 
         # Should these lines be run during inference?
         output_proposals_valid = (
@@ -909,7 +1152,9 @@ class EncoderProposals(Prompter):
         )
 
         output_memory = memory
-        output_memory = output_memory.masked_fill(memory_padding_mask.unsqueeze(-1), float(0))
+        output_memory = output_memory.masked_fill(
+            memory_padding_mask.unsqueeze(-1), float(0)
+        )
         output_memory = output_memory.masked_fill(~output_proposals_valid, float(0))
         output_memory = self.enc_output_norm(self.enc_output(output_memory))
 
@@ -917,9 +1162,12 @@ class EncoderProposals(Prompter):
 
     def get_proposals(self, memory, mask_flatten, spatial_shapes, sensor):
         output_memory, box_proposals = self.gen_encoder_output_proposals(
-            memory, mask_flatten, spatial_shapes, sensor)
+            memory, mask_flatten, spatial_shapes, sensor
+        )
 
-        encoder_proposals = [Instances3D(image_size) for image_size in sensor["image"].data.image_sizes]
+        encoder_proposals = [
+            Instances3D(image_size) for image_size in sensor["image"].data.image_sizes
+        ]
         for encoder_proposals_, box_proposals_ in zip(encoder_proposals, box_proposals):
             # We call these anchors because they follow some spatial prior.
             encoder_proposals_.proposal_boxes = box_proposals_
@@ -933,7 +1181,11 @@ class EncoderProposals(Prompter):
         instances = []
         for encoder_proposal in encoder_proposals:
             # index 0 is foreground-ness.
-            topk_proposals_ = torch.topk(encoder_proposal.pred_logits[..., 0], min(top_k, len(encoder_proposal)), dim=0)[1]
+            topk_proposals_ = torch.topk(
+                encoder_proposal.pred_logits[..., 0],
+                min(top_k, len(encoder_proposal)),
+                dim=0,
+            )[1]
             instances_ = encoder_proposal.clone()[topk_proposals_]
 
             instances.append(instances_)
@@ -942,14 +1194,16 @@ class EncoderProposals(Prompter):
         #       (which are needed for initialization of queries).
         return (encoder_proposals, instances)
 
-    def inference_single_image(self, output, image_size, topk):            
+    def inference_single_image(self, output, image_size, topk):
         class_prob = output.pred_logits.sigmoid()
+        # Clamp topk to not exceed the number of available predictions
+        topk = min(topk, class_prob.numel())
         topk_values, topk_indexes = torch.topk(class_prob.view(-1), topk)
 
         class_scores = topk_values
         topk_boxes = topk_indexes // class_prob.shape[-1]
         labels = topk_indexes % class_prob.shape[-1]
-        
+
         boxes = box_cxcywh_to_xyxy(output.pred_boxes)
         boxes = boxes[topk_boxes]
         xyz = output.pred_xyz[topk_boxes]
@@ -959,22 +1213,27 @@ class EncoderProposals(Prompter):
         proj_xy = output.pred_proj_xy[topk_boxes]
 
         result = Instances3D(image_size)
-            
+
         result.scores = class_scores
         result.pred_classes = labels
         result.pred_boxes = boxes
         result.pred_logits = output.pred_logits[topk_boxes]
         result.pred_boxes.clip_(
             min=torch.tensor([0.0, 0.0, 0.0, 0.0], device=boxes.device),
-            max=torch.tensor([image_size[1], image_size[0], image_size[1], image_size[0]], device=boxes.device))
+            max=torch.tensor(
+                [image_size[1], image_size[0], image_size[1], image_size[0]],
+                device=boxes.device,
+            ),
+        )
 
         result.pred_boxes_3d = GeneralInstance3DBoxes(
             # Account for WHL ordering.
             torch.cat((xyz, dims[:, [2, 1, 0]]), dim=-1),
-            pose)
+            pose,
+        )
         result.object_desc = object_desc
         result.pred_proj_xy = proj_xy
-        
+
         return result
 
     def inference(self, prompt, output, sensor, topk):
@@ -984,16 +1243,29 @@ class EncoderProposals(Prompter):
 
             K = info.image.K[-1:].repeat(len(output_), 1, 1)
             output_xyz = torch.bmm(
-                torch.linalg.inv(K), torch.cat((output_.pred_z_scaled * output_.pred_proj_xy, output_.pred_z_scaled), dim=-1)[..., None])[..., 0]
+                torch.linalg.inv(K),
+                torch.cat(
+                    (
+                        output_.pred_z_scaled * output_.pred_proj_xy,
+                        output_.pred_z_scaled,
+                    ),
+                    dim=-1,
+                )[..., None],
+            )[..., 0]
 
             output_.pred_xyz = output_xyz
 
             if info.has("T_gravity"):
                 output_.pred_pose = info.T_gravity[-1:] @ output_.pred_pose
 
-            results.append(self.inference_single_image(output_, sensor["image"].data.image_sizes[index], topk=topk))
+            results.append(
+                self.inference_single_image(
+                    output_, sensor["image"].data.image_sizes[index], topk=topk
+                )
+            )
 
         return results
+
 
 class PromptEncoders(nn.Module):
     def __init__(self, **kwargs):
@@ -1001,6 +1273,7 @@ class PromptEncoders(nn.Module):
 
         for encoder_name, encoder in kwargs.items():
             setattr(self, encoder_name, encoder)
+
 
 class CubifyAnythingPrompting(nn.Module):
     def __init__(self, embed_dim, prompters, encoders):
@@ -1013,12 +1286,7 @@ class CubifyAnythingPrompting(nn.Module):
         for prompter in self.prompters:
             prompter.encoders = self.encoders
 
-    def get_image_prompts(
-            self,
-            src_flatten,
-            mask_flatten,
-            spatial_shapes,
-            sensor):
+    def get_image_prompts(self, src_flatten, mask_flatten, spatial_shapes, sensor):
 
         prompts = []
         for prompter in self.prompters:
@@ -1028,20 +1296,19 @@ class CubifyAnythingPrompting(nn.Module):
 
         return prompts
 
-    def get_instance_prompts(
-            self,
-            instances):
+    def get_instance_prompts(self, instances):
         prompts = []
         for prompter in self.prompters:
             if not isinstance(prompter, InstancePrompter):
                 continue
-            
+
             prompt = prompter(instances)
             if prompt is not None:
                 prompts.append(prompt)
-                
+
         return prompts
-        
+
+
 @torch.jit.script_if_tracing
 def move_device_like(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
     """
@@ -1049,6 +1316,7 @@ def move_device_like(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
     as constant during tracing, scripting the casting process as whole can workaround this issue.
     """
     return src.to(dst)
+
 
 def get_valid_ratio(mask):
     _, H, W = mask.shape
@@ -1059,6 +1327,7 @@ def get_valid_ratio(mask):
     valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
 
     return valid_ratio
+
 
 class Joiner(nn.Sequential):
     def __init__(self, backbone):
@@ -1094,9 +1363,18 @@ class Joiner(nn.Sequential):
         out = []
         for name, x in sorted(xs.items()):
             out.append(
-                NestedTensor(x, mask=torch.zeros((x.shape[0], x.shape[-2], x.shape[-1]), dtype=torch.bool, device=x.device)))
+                NestedTensor(
+                    x,
+                    mask=torch.zeros(
+                        (x.shape[0], x.shape[-2], x.shape[-1]),
+                        dtype=torch.bool,
+                        device=x.device,
+                    ),
+                )
+            )
 
         return out
+
 
 class CubifyTransformer(nn.Module):
     def __init__(
@@ -1108,7 +1386,7 @@ class CubifyTransformer(nn.Module):
         pixel_std,
         pos_embedding,
         sensor_name="wide",
-        topk_per_image=100
+        topk_per_image=100,
     ):
         super().__init__()
 
@@ -1117,7 +1395,9 @@ class CubifyTransformer(nn.Module):
         self.decoder = decoder
         self.pos_embedding = pos_embedding
 
-        self.register_buffer("pixel_mean", torch.tensor(pixel_mean).view(-1, 1, 1), False)
+        self.register_buffer(
+            "pixel_mean", torch.tensor(pixel_mean).view(-1, 1, 1), False
+        )
         self.register_buffer("pixel_std", torch.tensor(pixel_std).view(-1, 1, 1), False)
 
         assert (
@@ -1125,14 +1405,20 @@ class CubifyTransformer(nn.Module):
         ), f"{self.pixel_mean} and {self.pixel_std} have different shapes!"
 
         self.sensor_name = sensor_name
-        self.input_proj = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(backbone.num_channels[0], decoder.embed_dim, kernel_size=1),
-                nn.GroupNorm(32, decoder.embed_dim),
-            )
-        ])
+        self.input_proj = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Conv2d(
+                        backbone.num_channels[0], decoder.embed_dim, kernel_size=1
+                    ),
+                    nn.GroupNorm(32, decoder.embed_dim),
+                )
+            ]
+        )
 
-        self.level_embed = nn.Parameter(torch.Tensor(len(backbone.num_channels), decoder.embed_dim))
+        self.level_embed = nn.Parameter(
+            torch.Tensor(len(backbone.num_channels), decoder.embed_dim)
+        )
         self.topk_per_image = topk_per_image
 
     @property
@@ -1167,7 +1453,14 @@ class CubifyTransformer(nn.Module):
         )
         valid_ratios = torch.stack([get_valid_ratio(m) for m in masks], 1)
 
-        return src_flatten, lvl_pos_embed_flatten, mask_flatten, spatial_shapes, level_start_index, valid_ratios
+        return (
+            src_flatten,
+            lvl_pos_embed_flatten,
+            mask_flatten,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+        )
 
     def inference(
         self,
@@ -1179,7 +1472,7 @@ class CubifyTransformer(nn.Module):
 
         sensor = batched_sensors[self.sensor_name]
         features = self.backbone(sensor)
-        
+
         srcs = []
         masks = []
         pos_embeds = []
@@ -1193,30 +1486,50 @@ class CubifyTransformer(nn.Module):
             masks.append(mask)
             assert mask is not None
 
-        src_flatten, lvl_pos_embed_flatten, mask_flatten, spatial_shapes, level_start_index, valid_ratios = self._flatten(
-            srcs, pos_embeds, masks)
+        (
+            src_flatten,
+            lvl_pos_embed_flatten,
+            mask_flatten,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+        ) = self._flatten(srcs, pos_embeds, masks)
 
         device = src_flatten.device
 
-        prompts = self.prompting.get_image_prompts(src_flatten, mask_flatten, spatial_shapes, sensor)
+        prompts = self.prompting.get_image_prompts(
+            src_flatten, mask_flatten, spatial_shapes, sensor
+        )
         prompters = self.prompting.prompters
 
         #  Run the decoder + predictors.
         _, intermediate_preds = self.decoder(
             # Decode against encoder features.
-            src_flatten, lvl_pos_embed_flatten, mask_flatten, spatial_shapes, level_start_index, valid_ratios,
-            prompts, sensor)
+            src_flatten,
+            lvl_pos_embed_flatten,
+            mask_flatten,
+            spatial_shapes,
+            level_start_index,
+            valid_ratios,
+            prompts,
+            sensor,
+        )
 
         # Only consider the last layer's outputs.
         prompt_outputs = intermediate_preds[-1]
 
         prompt_start_idx = 0
         for prompter_index, (prompt, prompter) in enumerate(zip(prompts, prompters)):
-            prompt_outputs_ = [prompt_outputs__[prompt_start_idx:prompt.number_prompts] for prompt_outputs__ in prompt_outputs]
+            prompt_outputs_ = [
+                prompt_outputs__[prompt_start_idx : prompt.number_prompts]
+                for prompt_outputs__ in prompt_outputs
+            ]
 
             # Some prompts do not produce outputs (in general), so don't allow them to consume a prompt.
             if prompt.has_output:
-                results = prompter.inference(prompt, prompt_outputs_, sensor, topk=self.topk_per_image)
+                results = prompter.inference(
+                    prompt, prompt_outputs_, sensor, topk=self.topk_per_image
+                )
                 prompt_start_idx += prompt.number_prompts
                 break
 
@@ -1225,6 +1538,7 @@ class CubifyTransformer(nn.Module):
     def forward(self, batched_inputs, do_postprocess=True):
         return self.inference(batched_inputs)
 
+
 def make_cubify_transformer(dimension, depth_model, embed_dim=256):
     dimension_to_heads = {
         # ViT-B
@@ -1232,9 +1546,9 @@ def make_cubify_transformer(dimension, depth_model, embed_dim=256):
         # ViT-S
         384: 6,
         # ViT-T
-        192: 3
+        192: 3,
     }
-    
+
     model = CubifyTransformer(
         backbone=Joiner(
             backbone=ViT(
@@ -1264,23 +1578,25 @@ def make_cubify_transformer(dimension, depth_model, embed_dim=256):
                 depth_window_size=None,
                 layer_scale=not depth_model,
                 encoder_norm=not depth_model,
-                pretrain_img_size=512 if not depth_model else 224
-            )),            
+                pretrain_img_size=512 if not depth_model else 224,
+            )
+        ),
         pos_embedding=CameraRayEmbedding(dim=embed_dim),
         prompting=CubifyAnythingPrompting(
             embed_dim=embed_dim,
             prompters=[
                 MetricQueries(
-                    input_channels=embed_dim,
-                    input_stride=16,
-                    predictors=None),            
+                    input_channels=embed_dim, input_stride=16, predictors=None
+                ),
                 EncoderProposals(
                     input_channels=embed_dim,
                     input_stride=16,
                     level_strides=[16, 32, 64],
                     predictors=[
                         # Technically, this only gets supervised for 1 class (foreground).
-                        ClassPredictor(embed_dim=embed_dim, num_classes=2, num_layers=None),
+                        ClassPredictor(
+                            embed_dim=embed_dim, num_classes=2, num_layers=None
+                        ),
                         DeltaBox2DPredictor(embed_dim=embed_dim, num_layers=3),
                     ],
                     top_k_test=300,
@@ -1288,7 +1604,7 @@ def make_cubify_transformer(dimension, depth_model, embed_dim=256):
             ],
             encoders=PromptEncoders(
                 box_2d_encoder=Box2DPromptEncoderLearned(embed_dim=embed_dim)
-            )
+            ),
         ),
         decoder=PromptDecoder(
             embed_dim=embed_dim,
@@ -1298,24 +1614,31 @@ def make_cubify_transformer(dimension, depth_model, embed_dim=256):
                     num_heads=8,
                     rpe_hidden_dim=512,
                     rpe_type="linear",
-                    feature_stride=16),
+                    feature_stride=16,
+                ),
                 d_model=embed_dim,
-                d_ffn=2048, # for self-attention.
+                d_ffn=2048,  # for self-attention.
                 dropout=0.0,
                 activation=F.relu,
-                n_heads=8), # for self-attention.
+                n_heads=8,
+            ),  # for self-attention.
             num_layers=6,
             predictors=[
                 ScalePredictor(embed_dim=embed_dim),
                 ClassPredictor(embed_dim=embed_dim, num_classes=2, num_layers=None),
                 DeltaBox2DPredictor(embed_dim=embed_dim, num_layers=3),
                 AbsoluteBox3DPredictor(
-                    embed_dim=embed_dim, num_layers=3, pose_type="z", z_type="direct", scale_shift=True)
+                    embed_dim=embed_dim,
+                    num_layers=3,
+                    pose_type="z",
+                    z_type="direct",
+                    scale_shift=True,
+                ),
             ],
-            norm=nn.LayerNorm(embed_dim)),
+            norm=nn.LayerNorm(embed_dim),
+        ),
         pixel_mean=[123.675, 116.28, 103.53],
-        pixel_std=[58.395, 57.12, 57.375])
-    
+        pixel_std=[58.395, 57.12, 57.375],
+    )
+
     return model
-        
-    
